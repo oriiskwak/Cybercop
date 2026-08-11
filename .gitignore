@@ -1,0 +1,46 @@
+# 다운로드된 영상/결과물
+downloaded_videos/
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.webm
+*.flv
+*.ts
+
+# 파이프라인 산출물 (코드만 공개, 산출물/스크래핑 데이터는 비공개 유지)
+output_test_*/
+output_AdotX_*/
+data/input_10/
+app/uploaded_files/
+
+# 현재 사용 안 하는 보조 도구/백업/실험 스크립트 — 로컬엔 남겨두되 push 대상에서 제외
+classification/
+extract_cyber_objects.py
+review_and_add_objects.py
+add_ocr_postprocess.py
+summarize_thecheat_abnormal.py
+app/app_backup2/
+detection_ocr/
+rag/new_cyber_objects.json
+rag/new_cyber_objects_summary.json
+docs/cybercop_pipeline_v2.png
+
+# 영상 설명/객체 데이터 (VLM이 생성한 스크래핑 파생 콘텐츠 — 코드가 아니라 비공개 유지)
+data/시립대_객체영상리스트.csv
+data/사기_관련_객체_후보.csv
+data/thecheat_abnormal.csv
+
+# 서버/실행 로그
+*.log
+
+# 모델 캐시
+hf_models/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# 환경 설정
+.env

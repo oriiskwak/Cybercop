@@ -1,0 +1,33 @@
+# Python 3.10 권장 / CUDA 12.4 기준
+# 설치: pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.org/simple
+
+# PyTorch
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+
+# 딥러닝
+transformers==4.51.3
+accelerate
+soxr
+
+# RAG / 임베딩
+sentence-transformers
+faiss-cpu
+
+# 영상 처리
+opencv-python
+Pillow
+yt-dlp
+curl_cffi>=0.10  # yt-dlp의 TikTok 브라우저 impersonation에 필요 — 없으면 다운로드가 간헐적으로 실패함
+
+# OCR (cybercop_pipeline_AdotX_v0.1.py 전용)
+paddleocr==2.10.0
+paddlepaddle-gpu==2.6.2
+
+# HuggingFace
+huggingface_hub>=0.26.5
+
+# API 서버
+fastapi
+uvicorn[standard]
+python-multipart
