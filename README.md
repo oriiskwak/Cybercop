@@ -3,12 +3,10 @@
 YouTube/TikTok 영상 또는 로컬 영상/이미지에서 프레임 추출 → VLM(SKT A.X-4.0-VL-Light)으로 OCR/객체 인식 →
 RAG(FAISS + BGE-m3)로 사이버 범죄 유형 매칭 및 위험도 산출.
 
-이 저장소엔 서로 다른 세대의 파이프라인이 같이 있음. 뭐가 뭔지는 아래 [파이프라인 버전 안내](#파이프라인-버전-안내) 먼저 확인.
-
-> ⚠️ **TikTok URL 현재 막힘**: `--url`/`--csv`(TikTok 링크)와 `POST /api/video`(TikTok URL)가 TikTok의
-> 봇 차단(챌린지 페이지)에 걸려서 `Unexpected response from webpage request` 에러로 실패함. yt-dlp는 이미
-> 최신 버전이라 업데이트로 해결 안 됨 — 우회 방안(쿠키 등) 찾는 중. YouTube URL과 로컬 파일(`--file`/`--dir`/
-> `--seq_dir`, 이미지·영상 업로드) 입력은 이 문제와 무관하게 정상 동작.
+## 주의사항
+TikTok 링크를 넣었을 때 다운로드 단계에서 문제가 발생 → 최근 틱톡에서 크롤링 프로그램을 이전보다 강하게 차단하고 있어서, TikTok 영상 페이지에 접근하려 하면 사람이 아니라 로봇으로 판단해 접근을 막고 있는 오류 발생. 
+YouTube 영상이나 로컬 파일은 현재 문제와 무관하게 동작,
+현재 우회 방법은 검토 중.
 
 ## 시스템 요구사항
 
@@ -29,29 +27,18 @@ RAG(FAISS + BGE-m3)로 사이버 범죄 유형 매칭 및 위험도 산출.
 ├── requirements.txt                 # 패키지 목록
 ├── install.bat                      # Windows 설치 스크립트
 ├── app/
-│   ├── main.py                      # 원본 파이프라인 FastAPI 서버 (레거시)
+│   ├── main.py                      # 원본 파이프라인 FastAPI 서버 
 │   ├── main_v0_1.py                 # FastAPI 서버 (이전 버전, AdotX_v0_1.py 기준 — --seq_dir 없음)
 │   └── main_v0_2.py                 # FastAPI 서버 (권장, AdotX_v0_2.py 기준 — --seq_dir/이미지 시퀀스 업로드 포함)
-├── detection_ocr/                   # 개발용 폴더. AdotX_v0_1.py는 여기서 개발되어 루트로 배포 완료
-│   └── cybercop_pipeline_v2.py      # 개발 중간 단계 (참고용)
 ├── data/
 │   ├── labels.csv                   # 테스트용 영상 URL 목록 (label,url) — --csv 기본값
 │   ├── thecheat.csv                 # 테스트용 영상 URL 목록 (추가 세트) — 기본값 아님, --csv로 직접 지정해야 씀
 │   ├── img/                         # --seq_dir 테스트용 이미지 시퀀스 폴더
 │   │   └── kakao1/                  # 카톡 대화 스크린샷 예시 (6장)
-│   └── vlm_fallback_object_frequency.csv  # VLM 폴백 원본 출력 빈도 집계 (allowed_objects.json 어휘 보강 검토용, 1회성 진단 산출물)
 ├── rag/
 │   ├── allowed_objects.json         # 허용 객체 클래스 목록 (439종, JSON DB) — VLM 폴백 결과 정규화용 (두 파이프라인 다 사용)
 │   └── retrieval_docs.json          # 범죄 유형 문서 (26종 + 객체 키워드 자동 추가분) — 두 파이프라인 다 사용
-├── downloaded_videos/                # 다운로드 영상 저장 (자동 생성, git 비공개)
-└── hf_models/                        # 모델 캐시 (자동 생성, git 비공개)
-```
 
-> `*.mp4` 등 다운로드 영상 원본, `hf_models/`는 `.gitignore`로 제외 (public 저장소라 스크래핑한 영상/증거
-> 텍스트는 올리지 않음). 코드 받은 뒤 각자 환경에서 파이프라인 돌려서 산출물은 로컬에서 재생성.
->
-> `classification/`, `extract_cyber_objects.py`/`review_and_add_objects.py`, `detection_ocr/eval_metrics.py`,
-> `detection_ocr/output_v2`·`output_v3`는 지금 워크플로에서 안 씀. 로컬엔 남아있지만 `.gitignore`로 push 제외.
 
 ## 파이프라인 버전 안내
 
@@ -62,12 +49,7 @@ RAG(FAISS + BGE-m3)로 사이버 범죄 유형 매칭 및 위험도 산출.
 | `cybercop_pipeline_AdotX_v0_2.py` | **현재 사용** | v0.1과 동일 + 이미지 시퀀스(`--seq_dir`) 입력 지원 | 이어지는 스크린샷 여러 장을 폴더 전체 한 건으로 판정, 이미지 입력엔 OCR 클러스터링 대신 이미지별 개별 교정 사용 |
 
 `AdotX.py` → `AdotX_v0_1.py` 변경 내역은 **[CHANGELOG.md](./CHANGELOG.md)**, `AdotX_v0_1.py` → `AdotX_v0_2.py`
-변경 내역은 **[CHANGELOG_0.2.md](./CHANGELOG_0.2.md)** 참고. 새 버전이 나올 때마다 이전 버전 파일은 그대로 두고
-다음 버전 파일을 새로 만드는 방식으로 관리함 (버전 파일을 직접 덮어쓰지 않음).
-`detection_ocr/`는 `AdotX_v0_1.py` 개발하던 작업 폴더. 실제 배포/실행은 루트의 `cybercop_pipeline_AdotX_v0_2.py` 사용
-(`detection_ocr/cybercop_pipeline_v3.py`와 `pipeline/` 서브모듈은 루트 배포 후 중복이라 삭제, `app/main_v0_2.py`도
-루트 파일을 직접 import). API로 `--seq_dir`(이미지 시퀀스)까지 쓰려면 `app/main_v0_2.py`를 띄우세요 —
-`app/main_v0_1.py`는 아직 `AdotX_v0_1.py` 기준이라 이 기능이 없음.
+변경 내역은 **[CHANGELOG_0.2.md](./CHANGELOG_0.2.md)** 참고. 
 
 ## 설치
 
@@ -92,7 +74,7 @@ python cybercop_pipeline_AdotX_v0_2.py --url "https://www.youtube.com/shorts/영
 
 로컬 파일(영상 또는 이미지) 하나:
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --file "data/eximg.png"
+python cybercop_pipeline_AdotX_v0_2.py --file "data/img.png"
 ```
 
 로컬 폴더(안의 영상/이미지 파일 전부 각각 독립 판정):
@@ -100,7 +82,7 @@ python cybercop_pipeline_AdotX_v0_2.py --file "data/eximg.png"
 python cybercop_pipeline_AdotX_v0_2.py --dir "C:\사이버 범죄 데이터\직거래 사기"
 ```
 
-이어지는 이미지 시퀀스(카톡 대화 스크린샷 등, 폴더 전체를 한 건으로 판정) — **v0.2 신규**:
+이어지는 이미지 시퀀스(카톡 대화 스크린샷 등, 폴더 전체를 한 건으로 판정) — 
 ```bash
 python cybercop_pipeline_AdotX_v0_2.py --seq_dir "data/img/kakao1"
 ```
@@ -183,22 +165,6 @@ python detection_ocr/eval_metrics.py --results_dir output_AdotX_v0.2/results --c
 
 ---
 
-## 이전 버전들
-
-- **`cybercop_pipeline_AdotX_v0_1.py`**: v0.2의 직전 버전. CoT 분류 + Grounding DINO는 동일하고,
-  `--seq_dir`(이미지 시퀀스 입력)만 없음. 실행 자체는 가능 (`--url`/`--file`/`--dir`/`--csv`).
-  v0.1→v0.2 차이는 [CHANGELOG_0.2.md](./CHANGELOG_0.2.md) 참고.
-- **`cybercop_pipeline_AdotX.py`(레거시)**: 원본 파이프라인. 프레임마다 VLM 1번으로 OCR+객체를 동시 추출하고
-  RAG 유사도 임계값(0.5)으로 abnormal/normal 자동 판정하는 단순한 구조. 참고용으로 남겨둠, 실행 X.
-  **새 작업은 `cybercop_pipeline_AdotX_v0_2.py`로.** 차이는 [CHANGELOG.md](./CHANGELOG.md) 참고.
-
-```bash
-python cybercop_pipeline_AdotX.py --url "https://www.youtube.com/shorts/영상ID"
-python cybercop_pipeline_AdotX.py --file "data/eximg.png"
-python cybercop_pipeline_AdotX.py --dir "C:\사이버 범죄 데이터\직거래 사기"
-```
-
----
 
 ## 객체 인식 방식
 
@@ -233,11 +199,9 @@ normal,https://www.tiktok.com/@user/video/xxxxx
 ```
 
 ### 지원 범죄 유형 (26종)
-직거래 사기, 쇼핑몰 사기, 게임 사기, 이메일 무역사기, 기타 사이버 사기,
-피싱, 파밍, 스미싱, 메모리 해킹, 몸캠피싱, 메신저 이용사기, 기타 사이버 금융범죄,
-개인·위치정보 침해, 사이버저작권 침해, 기타 정보통신망 이용범죄,
-아동성 착취물, 불법 촬영물, 허위 영상물, 불법성 영상물, 기타 불법콘텐츠 범죄,
-스포츠 토토, 경마·경륜·경정, 카지노, 기타 사이버 도박, 명예훼손, 모욕
+사이버사기, 사이버 금융범죄, 개인·위치정보 침해, 사이버 저작권 침해, 사이버스팸메일,
+기타 정보통신망 이용 범죄, 사이버성폭력, 사이버도박, 사이버 명예훼손·모욕, 사이버스토킹,
+기타 불법 콘텐츠 범죄, 해킹, 서비스거부공격(DDoS), 악성프로그램, 기타 정보통신망 침해형 범죄
 
 ---
 
