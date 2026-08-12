@@ -1,7 +1,10 @@
 # Video OCR & RAG 기반 사이버 범죄 탐지 파이프라인
 
-YouTube/TikTok 영상 또는 로컬 영상/이미지에서 프레임 추출 → VLM(SKT A.X-4.0-VL-Light)으로 OCR/객체 인식 →
-RAG(FAISS + BGE-m3)로 사이버 범죄 유형 매칭 및 위험도 산출.
+YouTube/TikTok 영상, 로컬 영상/이미지, 이어지는 이미지 시퀀스를 입력받아 VLM(SKT A.X-4.0-VL-Light)으로
+사기/정상 여부를 1차 판단(CoT)하고, Grounding DINO로 사기 특화 객체가 탐지될 시 재판정 실시.
+사기(또는 검토필요)로 판정된 경우에만 PaddleOCR로 텍스트를 추출하고, RAG(FAISS + BGE-m3)로
+범죄 유형을 매칭해 위험도를 산출한다.
+
 
 ## 주의사항
 TikTok 링크를 넣었을 때 다운로드 단계에서 문제가 발생 → 최근 틱톡에서 크롤링 프로그램을 이전보다 강하게 차단하고 있어서, TikTok 영상 페이지에 접근하려 하면 사람이 아니라 로봇으로 판단해 접근을 막고 있는 오류 발생. 
@@ -36,17 +39,17 @@ YouTube 영상이나 로컬 파일은 현재 문제와 무관하게 동작,
 │   ├── img/                         # --seq_dir 테스트용 이미지 시퀀스 폴더
 │   │   └── kakao1/                  # 카톡 대화 스크린샷 예시 (6장)
 ├── rag/
-│   ├── allowed_objects.json         # 허용 객체 클래스 목록 (439종, JSON DB) — VLM 폴백 결과 정규화용 (두 파이프라인 다 사용)
-│   └── retrieval_docs.json          # 범죄 유형 문서 (26종 + 객체 키워드 자동 추가분) — 두 파이프라인 다 사용
+│   ├── allowed_objects.json         # 허용 객체 클래스 목록 (439종, JSON DB) 
+│   └── retrieval_docs_v2.json          # 범죄 유형 (15종 + 객체 키워드) 
 
 
 ## 파이프라인 버전 안내
 
-| 파일 | 상태 | 분류 방식 | 특징 |
+| 파일 | 상태 | 분류 방식
 |---|---|---|---|
-| `cybercop_pipeline_AdotX.py` | 레거시 (참고용, 실행 X) | 단일 VLM 호출로 OCR+객체 동시 추출, RAG 유사도 임계값으로 abnormal/normal 자동 판정 | — |
-| `cybercop_pipeline_AdotX_v0_1.py` | 이전 버전 (실행은 가능, 신규 기능 없음) | 2단계 CoT(묘사→판단) 분류 + Grounding DINO 증거탐지 + OCR 프레임간 클러스터링(IoU+CER) | 사기 판정 영상만 OCR/상세분석 실행, evidence_score 기반 정상→검토필요 에스컬레이션 |
-| `cybercop_pipeline_AdotX_v0_2.py` | **현재 사용** | v0.1과 동일 + 이미지 시퀀스(`--seq_dir`) 입력 지원 | 이어지는 스크린샷 여러 장을 폴더 전체 한 건으로 판정, 이미지 입력엔 OCR 클러스터링 대신 이미지별 개별 교정 사용 |
+| `cybercop_pipeline_AdotX.py` | 이전 버전 | 단일 VLM 호출로 OCR+객체 동시 추출, RAG 유사도 임계값으로 abnormal/normal 자동 판정 
+| `cybercop_pipeline_AdotX_v0_1.py` | 이전 버전 | 사기/정상 CoT 분류 + Grounding DINO 증거탐지 + OCR 프레임간 클러스터링(IoU+CER) 
+| `cybercop_pipeline_AdotX_v0_2.py` | **현재 사용** | v0.1과 동일 + 이미지 시퀀스 입력 지원 
 
 `AdotX.py` → `AdotX_v0_1.py` 변경 내역은 **[CHANGELOG.md](./CHANGELOG.md)**, `AdotX_v0_1.py` → `AdotX_v0_2.py`
 변경 내역은 **[CHANGELOG_0.2.md](./CHANGELOG_0.2.md)** 참고. 
@@ -64,7 +67,7 @@ pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu1
 ## 실행 방법 (`cybercop_pipeline_AdotX_v0_2.py`)
 
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --csv "data/labels.csv"
+python cybercop_pipeline_AdotX_v0_2.py --csv "data/thecheat.csv"
 ```
 
 단일 URL:
@@ -74,7 +77,7 @@ python cybercop_pipeline_AdotX_v0_2.py --url "https://www.youtube.com/shorts/영
 
 로컬 파일(영상 또는 이미지) 하나:
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --file "data/img.png"
+python cybercop_pipeline_AdotX_v0_2.py --file "data/eximg.png"
 ```
 
 로컬 폴더(안의 영상/이미지 파일 전부 각각 독립 판정):
@@ -87,44 +90,65 @@ python cybercop_pipeline_AdotX_v0_2.py --dir "C:\사이버 범죄 데이터\직�
 python cybercop_pipeline_AdotX_v0_2.py --seq_dir "data/img/kakao1"
 ```
 
-> `--url` / `--file` / `--dir` / `--seq_dir` / `--csv` 중 하나 (우선순위도 이 순서). 이미지는 시간 축이 없어서
-> `--file`은 1~3단계 모두 같은 프레임 1장을 재사용, `--seq_dir`은 폴더 안 이미지들을 파일명 순으로 정렬해
-> 하나의 프레임 시퀀스로 묶음 (분류용 대표 프레임은 `--max_vlm_frames`보다 많으면 전체 구간에서 고르게 추출).
-> `output_AdotX_v0.2/results/ocr_results_{id}.json`이 이미 있으면 자동 스킵하므로, CSV에 새 행만 추가하고
-> 다시 돌리면 새로 추가된 영상만 처리됨 (`--seq_dir`은 폴더명이 `{id}`).
+> 입력값은 `--url` / `--file` / `--dir` / `--seq_dir` / `--csv` 
 
 ### 옵션
 | 인자 | 기본값 | 설명 |
 |---|---|---|
 | `--csv` | `data/labels.csv` | `label`/`link`(또는 `url`) 컬럼을 가진 CSV |
-| `--seq_dir` | — | 이어지는 이미지 시퀀스가 담긴 디렉토리 경로 (폴더 전체를 한 건으로 판정, **v0.2 신규**) |
+| `--seq_dir` | — | 연속적인 이미지 시퀀스가 담긴 디렉토리 경로 |
 | `--out_dir` | `./output_AdotX_v0.2` | 결과 저장 경로 |
-| `--model` | `skt/A.X-4.0-VL-Light` | 분류/OCR-객체 추출용 VLM |
-| `--gdino_model` | `IDEA-Research/grounding-dino-tiny` | 증거탐지용 Grounding DINO |
+| `--model` | `skt/A.X-4.0-VL-Light` | 초기 사기/정상 분류/ OCR-객체 추출용 VLM |
+| `--gdino_model` | `IDEA-Research/grounding-dino-tiny` | 범죄 특화 객체 추출용 Grounding DINO |
 | `--scan_sec` | `0.5` | 분류용 키프레임 스캔 간격 (장면전환 기반 최대 4프레임 선정, 영상만 해당) |
-| `--max_vlm_frames` | `4` | 분류에 사용할 대표 프레임 수 |
-| `--dino_sec` | `3.0` | DINO 증거탐지 프레임 간격 (영상만 해당) |
+| `--max_vlm_frames` | `4` | 분류에 사용할 대표 프레임 수 (초기 사기/정상 분류) |
+| `--dino_sec` | `3.0` | DINO 프레임 간격 (영상만 해당) |
 | `--max_dino_frames` | `15` | DINO에 넘길 최대 프레임 수 (영상만 해당) |
 | `--sample_sec` | `2.0` | 사기/검토필요 판정 시 OCR용 균등 샘플링 간격 (영상만 해당) |
 | `--max_frames` | `1000` | OCR용 최대 프레임 수 (영상만 해당) |
-| `--escalate_thr` | `0.15` | evidence_score가 이 값 이상이면 "정상"→"검토필요"로 에스컬레이션 |
-| `--top_k` | `3` | RAG 검색 상위 문서 수 |
+| `--escalate_thr` | `0.15` | evidence_score가 이 값 이상이면 정상→검토필요로 에스컬레이션 |
+| `--top_k` | `3` | RAG 검색 상위 범죄 유형 |
 
 ### 처리 파이프라인
 
 ```
-1단계 CoT 분류(묘사→판단) → 2단계 Grounding DINO 증거탐지(전체 영상) → 에스컬레이션 판정
-   → (사기/검토필요만) OCR 프레임간 클러스터링 + 오브젝트 상세분석 → RAG 검색
+1단계 초기 사기 정상 CoT 분류 → 2단계 Grounding DINO  범죄 특화 객체 추출  → 에스컬레이션 판정
+   → ( 1단계 결과 사기/검토필요 시) OCR 프레임간 클러스터링 + 객체 리스트 → RAG 검색(범죄 유형 추출)
 ```
+1단계 (초기 사기/정상 CoT 분류): 영상/이미지에서 대표 프레임 최대 4장을 뽑아 VLM에 입력.
+①화면에 보이는 내용을 판단 없이 서술 → ②그 서술을 체크리스트(8개 사기 패턴) 기준으로
+사기/정상 판단. 
 
-1. **1단계 분류**: 장면전환 기반 키프레임(최대 4개)을 grid 이미지로 만들어 VLM에 입력 → ①이미지→서술(판단 없이 관찰만) ②서술 텍스트→8개 체크리스트 기준 판단(사기/정상). 이미지 인코딩 없는 2단계는 1단계보다 5~10배 빠름
-2. **Grounding DINO 증거탐지**: 모든 영상에서 실행. 3초 간격 최대 15프레임에서 36종 사기 증거 어휘(주식차트, 카카오톡/텔레그램 화면, 계좌번호, QR코드, 검찰청 공문서 등, `SCAM_EVIDENCE_VOCAB`)를 zero-shot 탐지, 영상 단위로 집계해 `evidence_score`/`top_labels` 산출
-3. **에스컬레이션**: CoT가 "정상"으로 판단해도 `evidence_score ≥ escalate_thr`이면 최종 라벨을 "검토필요"로 올림 (사기를 놓치는 것보다 과탐지가 낫다는 원칙). `evidence_score`/`top_labels` 둘 다 `avg_score >= 0.55`(`MIN_LABEL_SCORE`, `pipeline/evidence_aggregator.py`)인 탐지만 반영 — 경계선 애매한 탐지가 정상 영상을 검토필요로 잘못 넘기거나 RAG 쿼리를 오염시키는 걸 방지
-4. **OCR + 상세분석** (최종 라벨이 사기/검토필요인 영상만): PaddleOCR로 텍스트 추출.
-   - **영상**: 프레임 간 **IoU(같은 화면 위치) + CER(비슷한 문자열)** 기반 Union-Find 클러스터링으로 동일 UI 텍스트의 OCR 오탈자를 다수결 병합 → 클러스터링된 전체 타임라인을 VLM에 한 번 더 넣어 오타/할루시네이션 교정. 실시간으로 바뀌는 숫자값(호가 등)은 클러스터링 대상에서 제외해 오탐 병합 방지
-   - **이미지 시퀀스(`--seq_dir`, v0.2 신규)**: 이 클러스터링은 안 씀 — 각 이미지가 서로 다른 화면이라 "같은 요소가 여러 프레임에 반복 등장"한다는 전제 자체가 안 맞기 때문. 대신 이미지별 원문(`ocr_before[i]`)을 그대로 유지한 채 VLM으로 이미지 1장씩 개별 오타 교정만 수행 (문장 재배열·타 이미지와 병합 없음)
-5. **객체 인식** (최종 라벨이 사기/검토필요인 영상만): Grounding DINO의 `top_labels`(36종 어휘, 위 2번)와 VLM 자유서술 폴백 결과를 **항상 둘 다** 실행해서 합침 — DINO는 정밀하지만 좁은 어휘라 놓치는 게 많고 VLM은 넓지만 부정확할 수 있어서, 사기로 확정된 영상은 증거를 최대한 남기기 위해 서로 보완시킴. VLM 폴백 결과는 `ObjectMapper`(임베딩 유사도, threshold 0.7)로 `rag/allowed_objects.json`(439종)에 정규화해서 합침 (정상 영상은 이 단계 자체를 스킵)
-6. **RAG 검색**: 병합/교정된 OCR 텍스트 + 감지 객체를 쿼리로 범죄 유형 문서 검색
+2단계 (Grounding DINO 범죄 특화 객체 추출 → 에스컬레이션 판정): 모든 영상에서 실행.
+계좌 화면, 카카오톡/텔레그램 화면, 신분증, QR코드 등 36종 사기 증거 어휘를 화면에서
+직접 탐지(zero-shot). 1단계가 "정상"으로 판단했어도 evidence_score가
+기준치 이상(현재 0.15)이면 "검토필요"로 재분류 
+
+(1단계 결과 사기/검토필요 시) OCR 프레임간 클러스터링 + 객체 리스트: "정상" 확정 영상은
+OCR과 객체 탐지생략. PaddleOCR로 화면 텍스트 추출 후, 여러 프레임에 걸쳐 반복
+등장하는 같은 텍스트를 위치+문자열 유사도로 묶어서 OCR 오탈자를 다수결로 정리.
+객체는 DINO 탐지 결과 + VLM이 자유롭게 나열한 객체 목록을 합쳐서 최대한 많은 객체리스트를 추출.
+
+RAG 검색 (범죄 유형 추출): 정리된 OCR 텍스트 + 객체 목록을 하나의 쿼리로 만들어
+범죄 유형 문서 DB(15개 대분류)에서 임베딩 유사도로 가장 가까운 유형을 검색·매칭.
+
+
+## Input 
+
+| 항목 | 형식 | 설명 |
+|---|---|---|
+| `--url` | URL 문자열 | YouTube / TikTok 단일 영상 |
+| `--file` | 파일 경로 | 로컬 영상 또는 이미지 단일 파일 (모든 파이프라인 지원) |
+| `--csv` | CSV 파일 경로 | `label`, `link`(또는 `url`) 컬럼 포함 |
+| `--dir` | 디렉토리 경로 | 영상/이미지 파일이 담긴 로컬 폴더, 파일마다 독립 판정 (모든 파이프라인 지원) |
+| `--seq_dir` | 디렉토리 경로 | 이어지는 이미지 시퀀스가 담긴 폴더, 폴더 전체를 한 건으로 판정 |
+
+CSV 형식:
+```csv
+label,link
+abnormal,https://www.youtube.com/shorts/xxxxx
+normal,https://www.tiktok.com/@user/video/xxxxx
+```
 
 ### Output
 `output_AdotX_v0.2/results/ocr_results_{id}.json`:
@@ -149,56 +173,18 @@ python cybercop_pipeline_AdotX_v0_2.py --seq_dir "data/img/kakao1"
   "ocr": [{ "start": "00:00", "end": "00:04", "text": "지금 투자하면 300% 수익 보장! @kakao_id" }],
   "ocr_after": "지금 투자하면 300% 수익 보장! @kakao_id | ...",
   "ocr_candidates": [{ "candidates": [{ "text": "...", "count": 3, "avg_score": 0.91 }], "dominant_share": 0.75, "stable": true, "bbox": [10.0, 10.0, 100.0, 26.0] }],
-  "rag": [{ "crime_type": "피싱", "similarity": 0.87, "risk_level": 0.22 }],
+  "rag": [{ "crime_type": "사이버금융범죄", "similarity": 0.87, "risk_level": 0.22 }],
   "total_inference_time": 32.69,
-  "skipped": false
 }
 ```
 
 `final_label`이 정상이면 `skipped: true`, `objects`/`ocr`/`ocr_after`/`rag`는 빈 값.
 `--seq_dir`(이미지 시퀀스) 입력은 `ocr_candidates`가 항상 빈 배열 (클러스터링을 안 쓰므로).
 
-### 평가 (accuracy/precision/recall/f1/평균 추론시간)
-```bash
-python detection_ocr/eval_metrics.py --results_dir output_AdotX_v0.2/results --csv data/labels.csv --out output_AdotX_v0.2/eval_summary.json
-```
-
----
 
 
-## 객체 인식 방식
 
-- **`cybercop_pipeline_AdotX.py`(레거시)**: VLM이 자유롭게 출력한 객체명을 **임베딩 유사도(BGE-m3)**로
-  `rag/allowed_objects.json`의 허용 클래스(439종)에 매핑. 프롬프트에 전체 클래스 목록을 안 넣어서 inference
-  빠르고, JSON 파일만 편집하면 클래스 목록 관리 가능.
-- **`cybercop_pipeline_AdotX_v0_1.py`/`v0_2.py`(현재)**: v0.1과 동일한 방식을 v0.2도 그대로 씀 (변경 없음).
-  두 소스를 합쳐서 사용.
-  1. Grounding DINO가 탐지한 사기 증거 라벨 중 신뢰도(`avg_score >= 0.55`) 높은 것만 (`SCAM_EVIDENCE_VOCAB`,
-     `pipeline/vocab.py`의 36개 고정 어휘 — 좁고 정밀한 사기 판별용 어휘, `allowed_objects.json`과는 별개 목록)
-  2. VLM 자유서술 폴백 결과를 레거시와 동일한 `ObjectMapper`(임베딩 유사도, threshold 0.7)로 `allowed_objects.json`
-     (439종)에 정규화한 것
-  둘을 합집합으로 합쳐서 최종 `objects`로 사용 (사기/검토필요 확정된 영상만 실행).
-
----
-
-## Input 공통 정의
-
-| 항목 | 형식 | 설명 |
-|---|---|---|
-| `--url` | URL 문자열 | YouTube / TikTok 단일 영상 |
-| `--file` | 파일 경로 | 로컬 영상 또는 이미지 단일 파일 (모든 파이프라인 지원) |
-| `--csv` | CSV 파일 경로 | `label`, `link`(또는 `url`) 컬럼 포함 |
-| `--dir` | 디렉토리 경로 | 영상/이미지 파일이 담긴 로컬 폴더, 파일마다 독립 판정 (모든 파이프라인 지원) |
-| `--seq_dir` | 디렉토리 경로 | 이어지는 이미지 시퀀스가 담긴 폴더, 폴더 전체를 한 건으로 판정 (`AdotX_v0_2.py`만) |
-
-CSV 형식:
-```csv
-label,link
-abnormal,https://www.youtube.com/shorts/xxxxx
-normal,https://www.tiktok.com/@user/video/xxxxx
-```
-
-### 지원 범죄 유형 (26종)
+### 지원 범죄 유형 (15종)
 사이버사기, 사이버 금융범죄, 개인·위치정보 침해, 사이버 저작권 침해, 사이버스팸메일,
 기타 정보통신망 이용 범죄, 사이버성폭력, 사이버도박, 사이버 명예훼손·모욕, 사이버스토킹,
 기타 불법 콘텐츠 범죄, 해킹, 서비스거부공격(DDoS), 악성프로그램, 기타 정보통신망 침해형 범죄
@@ -211,9 +197,9 @@ CLI 파이프라인을 FastAPI로 래핑한 서버 세 개. **신규 연동은 `
 
 | 파일 | 기반 파이프라인 | 상태 |
 |---|---|---|
-| `app/main.py` | `cybercop_pipeline_AdotX.py` (레거시) | 레거시 |
-| `app/main_v0_1.py` | `cybercop_pipeline_AdotX_v0_1.py` | 이전 버전 (이미지 시퀀스 엔드포인트 없음) |
-| `app/main_v0_2.py` | `cybercop_pipeline_AdotX_v0_2.py` | **권장** (이미지 시퀀스 업로드 엔드포인트 포함) |
+| `app/main.py` | `cybercop_pipeline_AdotX.py`  | 레거시 |
+| `app/main_v0_1.py` | `cybercop_pipeline_AdotX_v0_1.py` | 이전 버전  |
+| `app/main_v0_2.py` | `cybercop_pipeline_AdotX_v0_2.py` | **최신 버전**  |
 
 ### 서버 실행
 
