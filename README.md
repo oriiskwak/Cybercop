@@ -40,7 +40,7 @@ YouTube 영상이나 로컬 파일은 현재 문제와 무관하게 동작,
 │   │   └── kakao1/                  # 카톡 대화 스크린샷 예시 (6장)
 ├── rag/
 │   ├── allowed_objects.json         # 허용 객체 클래스 목록 (439종, JSON DB) 
-│   └── retrieval_docs_v2.json          # 범죄 유형 (15종 + 객체 키워드) 
+│   └── retrieval_docs_v2.json          # 범죄 유형 (15종 + 범죄 유형 관련 키워드) 
 
 
 ## 파이프라인 버전 안내
@@ -151,7 +151,10 @@ normal,https://www.tiktok.com/@user/video/xxxxx
 ```
 
 ### Output
-`output_AdotX_v0.2/results/ocr_results_{id}.json`:
+
+```json
+### Output
+`output_AdotX_v0.2/results/ocr_results_{id}.json` — 실제 저장된 결과 파일 기준으로 필드/순서를 그대로 옮긴 예시(값은 축약):
 
 ```json
 {
@@ -161,21 +164,62 @@ normal,https://www.tiktok.com/@user/video/xxxxx
   "label": "abnormal",
   "cls_label": "사기",
   "final_label": "사기",
-  "classify_summary": "관찰 서술 + 판단근거 (묘사 부분은 할루시네이션 가능성 있음 — 정확한 텍스트는 ocr/ocr_after 참고)",
+  "classify_summary": "관찰 서술 + 판단근거",
   "grounding": {
-    "labels": { "카카오톡 화면": { "count": 3, "frame_count": 2, "frame_ratio": 0.4, "segment": "early", "avg_score": 0.62 } },
+    "labels": {
+      "카카오톡 화면": {
+        "count": 6,
+        "frame_count": 6,
+        "frame_ratio": 1.0,
+        "first_sec": 0.0,
+        "last_sec": 5.0,
+        "segment": "both",
+        "avg_score": 0.4549
+      }
+    },
     "evidence_score": 0.38,
     "n_detected_frames": 5,
     "top_labels": ["카카오톡 화면", "주식 차트"]
   },
+  "total_inference_time": 32.69,
   "objects": ["휴대전화", "채팅창"],
   "ocr_before": ["프레임별(또는 이미지별) 원시 OCR 텍스트", "..."],
   "ocr": [{ "start": "00:00", "end": "00:04", "text": "지금 투자하면 300% 수익 보장! @kakao_id" }],
   "ocr_after": "지금 투자하면 300% 수익 보장! @kakao_id | ...",
-  "ocr_candidates": [{ "candidates": [{ "text": "...", "count": 3, "avg_score": 0.91 }], "dominant_share": 0.75, "stable": true, "bbox": [10.0, 10.0, 100.0, 26.0] }],
-  "rag": [{ "crime_type": "사이버금융범죄", "similarity": 0.87, "risk_level": 0.22 }],
-  "total_inference_time": 32.69,
+  "ocr_candidates": [
+    {
+      "candidates": [{ "text": "...", "count": 3, "avg_score": 0.91 }],
+      "dominant_share": 0.75,
+      "stable": true,
+      "num_frames": 3,
+      "frame_range": [0, 5],
+      "start": "00:00",
+      "end": "00:05",
+      "bbox": [10.0, 10.0, 100.0, 26.0]
+    }
+  ],
+  "rag": [
+    {
+      "doc_id": "C001_kw_12",
+      "crime_id": "C001",
+      "major_category": "정보통신망 이용 범죄",
+      "crime_type": "사이버사기",
+      "source_type": "keywords",
+      "text": "사이버사기에서 자주 나타나는 표현은 급처, 반값정리, 선입금, 계좌이체, ... 등이다.",
+      "metadata": {
+        "chunk_index": 12,
+        "chunk_size": 20,
+        "keywords": ["급처", "반값정리", "선입금", "..."],
+        "original_sub_category": "기타",
+        "original_crime_id": "C005",
+        "original_doc_id": "C005_kw_1"
+      },
+      "similarity": 0.55,
+      "risk_level": 0.28
+    }
+  ]
 }
+
 ```
 
 `final_label`이 정상이면 `skipped: true`, `objects`/`ocr`/`ocr_after`/`rag`는 빈 값.
