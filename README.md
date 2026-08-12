@@ -142,10 +142,6 @@ normal,https://www.tiktok.com/@user/video/xxxxx
 ### Output
 
 ```json
-### Output
-`output_AdotX_v0.2/results/ocr_results_{id}.json` — 실제 저장된 결과 파일 기준으로 필드/순서를 그대로 옮긴 예시(값은 축약):
-
-```json
 {
   "id": "영상ID",
   "url": "원본 URL",
