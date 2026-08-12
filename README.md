@@ -212,10 +212,7 @@ uvicorn app.main_v0_1:app --host 0.0.0.0 --port 8000
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-> 기본 GPU는 0번. 다른 GPU를 쓰려면 실행 전 `export CUDA_VISIBLE_DEVICES=1` 등으로 지정 (0번이 다른 프로세스로
-> 차 있을 때 우회용).
-
-서버 시작 시 VLM 모델, Grounding DINO(레거시 제외), PaddleOCR, RAG 인덱스 자동 로드.
+서버 시작 시 VLM 모델, Grounding DINO, PaddleOCR, RAG 인덱스 자동 로드.
 
 ### 엔드포인트 (v0.1/v0.2 공통 + v0.2 신규)
 
