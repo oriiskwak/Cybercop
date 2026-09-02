@@ -1,32 +1,33 @@
 # Video OCR & RAG 기반 사이버 범죄 탐지 파이프라인
 
-YouTube/TikTok 영상, 로컬 영상/이미지, 이어지는 이미지 시퀀스를 입력받아 VLM(SKT A.X-4.0-VL-Light)으로
-사기/정상 여부를 1차 판단(CoT)하고, Grounding DINO로 사기 특화 객체가 탐지될 시 재판정 실시.
-사기(또는 검토필요)로 판정된 경우에만 PaddleOCR로 텍스트를 추출하고, RAG(FAISS + BGE-m3)로
-범죄 유형을 매칭해 위험도를 산출한다.
+YouTube/TikTok 영상, 로컬 영상/이미지를 입력받아 VLM으로
+사기/정상 여부를 1차 판단(CoT)하고, 사기 특화 객체가 탐지될 시 재판정 실시.
+사기(또는 검토필요)로 판정된 경우에만 RapidOCR로 텍스트를 추출하고, 
+RAG(FAISS + BGE-m3)로 범죄 유형을 매칭해 위험도를 산출한다.
 
 
 ## 주의사항
 TikTok 링크를 넣었을 때 다운로드 단계에서 문제가 발생 → 최근 틱톡에서 크롤링 프로그램을 이전보다 강하게 차단하고 있어서, TikTok 영상 페이지에 접근하려 하면 사람이 아니라 로봇으로 판단해 접근을 막고 있는 오류 발생. 
-YouTube 영상이나 로컬 파일은 현재 문제와 무관하게 동작,
-현재 우회 방법은 검토 중.
+YouTube 영상이나 로컬 파일은 현재 문제와 무관하게 동작, 현재 우회 방법은 검토 중.
 
 ## 시스템 요구사항
 
-- **Python**: 3.10
-- **CUDA**: 12.4 (GPU 필수)
+- **Python**: 3.11
+- **CUDA**: 12.6 (GPU 필수)
 - **VRAM**: 10GB 이상
-- **테스트 환경**: torch 2.6.0 + transformers 4.51.3
+- **테스트 환경**: torch 2.12.0 + transformers 5.16.1
 
 ## 디렉토리 구조
 
 ```
 ├── cybercop_pipeline_AdotX.py       # 원본 파이프라인 (레거시, 참고용 — 실행 X)
 ├── cybercop_pipeline_AdotX_v0_1.py  # 이전 버전 (CoT 분류 + Grounding DINO, --seq_dir 없음)
-├── cybercop_pipeline_AdotX_v0_2.py  # 현재 사용하는 파이프라인 (v0.1 + 이미지 시퀀스 입력)
-├── pipeline/                        # AdotX_v0_1.py/v0_2.py 공용 서브모듈 (frame_sampler, vlm_classify, grounding_detector, evidence_aggregator, vocab)
+├── cybercop_pipeline_AdotX_v0_2.py  # 이전 버전 (v0.1 + 이미지 시퀀스 입력)
+├── cybercop_pipeline_AdotX_v0_3.py  # 현재 사용하는 파이프라인
+├── pipeline/                        # 공용 서브모듈 (frame_sampler, vlm_classify, grounding_detector, evidence_aggregator, vocab)
 ├── CHANGELOG.md                     # AdotX.py → AdotX_v0_1.py 변경 이력
 ├── CHANGELOG_0.2.md                 # AdotX_v0_1.py → AdotX_v0_2.py 변경 이력
+├── CHANGELOG_0.3.md                 # AdotX_v0_2.py → AdotX_v0_3.py 변경 이력
 ├── requirements.txt                 # 패키지 목록
 ├── install.bat                      # Windows 설치 스크립트
 ├── app/
@@ -49,55 +50,54 @@ YouTube 영상이나 로컬 파일은 현재 문제와 무관하게 동작,
 |---|---|---|---|
 | `cybercop_pipeline_AdotX.py` | 이전 버전 | 단일 VLM 호출로 OCR+객체 동시 추출, RAG 유사도 임계값으로 abnormal/normal 자동 판정 
 | `cybercop_pipeline_AdotX_v0_1.py` | 이전 버전 | 사기/정상 CoT 분류 + Grounding DINO 증거탐지 + OCR 프레임간 클러스터링(IoU+CER) 
-| `cybercop_pipeline_AdotX_v0_2.py` | **현재 사용** | v0.1과 동일 + 이미지 시퀀스 입력 지원 
-
-`AdotX.py` → `AdotX_v0_1.py` 변경 내역은 **[CHANGELOG.md](./CHANGELOG.md)**, `AdotX_v0_1.py` → `AdotX_v0_2.py`
-변경 내역은 **[CHANGELOG_0.2.md](./CHANGELOG_0.2.md)** 참고. 
+| `cybercop_pipeline_AdotX_v0_2.py` | 이전 버전 | v0.1과 동일 + 이미지 시퀀스 입력 지원 
+| `cybercop_pipeline_AdotX_v0_3.py` | **현재 사용** | Grounding DINO 제거, PaddleOCR -> RapidOCR
 
 ## 설치
 
 ```bash
-pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.org/simple
+pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu126 --extra-index-url https://pypi.org/simple
 ```
 
 > Linux GPU 서버: `requirements.txt`의 `faiss-cpu` → `faiss-gpu`로 바꿔서 설치
+> OpenCV: 필요에 따라 openv-python-headless (서버용) & opencv-python 변경하여 설치
 
 ---
 
-## 실행 방법 (`cybercop_pipeline_AdotX_v0_2.py`)
+## 실행 방법 (`cybercop_pipeline_AdotX_v0_3.py`)
 
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --csv "data/thecheat.csv"
+python cybercop_pipeline_AdotX_v0_3.py --csv "data/thecheat.csv"
 ```
 
 단일 URL:
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --url "https://www.youtube.com/shorts/영상ID"
+python cybercop_pipeline_AdotX_v0_3.py --url "https://www.youtube.com/shorts/영상ID"
 ```
 
 로컬 파일(영상 또는 이미지) 하나:
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --file "data/eximg.png"
+python cybercop_pipeline_AdotX_v0_3.py --file "data/eximg.png"
 ```
 
 로컬 폴더(안의 영상/이미지 파일 전부 각각 독립 판정):
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --dir "C:\사이버 범죄 데이터\직거래 사기"
+python cybercop_pipeline_AdotX_v0_3.py --dir "C:\사이버 범죄 데이터\직거래 사기"
 ```
 
 이어지는 이미지 시퀀스(카톡 대화 스크린샷 등, 폴더 전체를 한 건으로 판정) — 
 ```bash
-python cybercop_pipeline_AdotX_v0_2.py --seq_dir "data/img/kakao1"
+python cybercop_pipeline_AdotX_v0_3.py --seq_dir "data/img/kakao1"
 ```
 
 > 입력값은 `--url` / `--file` / `--dir` / `--seq_dir` / `--csv` 
 
-### 옵션
+### 옵션 (수정필요)
 | 인자 | 기본값 | 설명 |
 |---|---|---|
 | `--csv` | `data/labels.csv` | `label`/`link`(또는 `url`) 컬럼을 가진 CSV |
 | `--seq_dir` | — | 연속적인 이미지 시퀀스가 담긴 디렉토리 경로 |
-| `--out_dir` | `./output_AdotX_v0.2` | 결과 저장 경로 |
+| `--out_dir` | `./output_AdotX_v0.3` | 결과 저장 경로 |
 | `--model` | `skt/A.X-4.0-VL-Light` | 초기 사기/정상 분류/ OCR-객체 추출용 VLM |
 | `--gdino_model` | `IDEA-Research/grounding-dino-tiny` | 범죄 특화 객체 추출용 Grounding DINO |
 | `--scan_sec` | `0.5` | 분류용 키프레임 스캔 간격 (장면전환 기반 최대 4프레임 선정, 영상만 해당) |
@@ -109,7 +109,7 @@ python cybercop_pipeline_AdotX_v0_2.py --seq_dir "data/img/kakao1"
 | `--escalate_thr` | `0.15` | evidence_score가 이 값 이상이면 정상→검토필요로 에스컬레이션 |
 | `--top_k` | `3` | RAG 검색 상위 범죄 유형 |
 
-### 처리 파이프라인
+### 처리 파이프라인 (수정필요)
 
 ```
 1단계 초기 사기 정상 CoT 분류 → 2단계 Grounding DINO  범죄 특화 객체 추출  → 에스컬레이션 판정
@@ -220,7 +220,7 @@ normal,https://www.tiktok.com/@user/video/xxxxx
 
 ---
 
-## API 서버
+## API 서버 (수정필요)
 
 CLI 파이프라인을 FastAPI로 래핑한 서버 세 개. **신규 연동은 `app/main_v0_2.py`.**
 
@@ -230,7 +230,7 @@ CLI 파이프라인을 FastAPI로 래핑한 서버 세 개. **신규 연동은 `
 | `app/main_v0_1.py` | `cybercop_pipeline_AdotX_v0_1.py` | 이전 버전  |
 | `app/main_v0_2.py` | `cybercop_pipeline_AdotX_v0_2.py` | **최신 버전**  |
 
-### 서버 실행
+### 서버 실행 (수정필요)
 
 ```bash
 # 현재
@@ -243,7 +243,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 서버 시작 시 VLM 모델, Grounding DINO, PaddleOCR, RAG 인덱스 자동 로드.
 
-### 엔드포인트 (v0.1/v0.2 공통 + v0.2 신규)
+### 엔드포인트 (v0.1/v0.2 공통 + v0.2 신규) (수정필요)
 
 | 엔드포인트 | 설명 |
 |---|---|
@@ -284,7 +284,7 @@ curl -X POST http://localhost:8000/api/video/upload/sequence \
 > `zip` 명령이 설치 안 된 환경(예: 이 서버)이 있어서 위 예시는 파이썬 `zipfile` 모듈로 압축함. `zip -j` 명령이
 > 설치돼 있으면 `zip -j /tmp/kakao1.zip data/img/kakao1/*`로도 동일하게 가능.
 
-### 현재 버전(v0.2) API 응답 형식
+### 현재 버전(v0.2) API 응답 형식 (수정필요)
 
 **단건 (`/api/video`, `/api/video/upload`, `/api/video/upload/sequence`)**
 ```json
