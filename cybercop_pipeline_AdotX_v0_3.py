@@ -40,7 +40,10 @@ from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
 from huggingface_hub import snapshot_download
 from sentence_transformers import SentenceTransformer
-from paddleocr import PaddleOCR
+
+# PaddleOCR에서 RapidOCR로 교체
+import onnxruntime as ort
+from rapidocr import RapidOCR, EngineType, LangDet, LangRec, ModelType, OCRVersion
 
 # 새 파이프라인 모듈
 from pipeline.frame_sampler import sample_uniform, sample_keyframe
@@ -51,7 +54,7 @@ from pipeline.vocab import SCAM_EVIDENCE_VOCAB  # {한국어: 영어} — v0.3�
 # ──────────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────────
-MODEL_ID            = os.getenv("VLM_MODEL", "skt/A.X-4.0-VL-Light")
+MODEL_ID            = os.getenv("VLM_MODEL", "google/gemma-4-E2B-it") # 최초 테스트 시 export HF_HUB_OFFLINE=0, "skt/A.X-4.0-VL-Light"
 DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
 TORCH_DTYPE         = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 DEFAULT_EMBED_MODEL = "BAAI/bge-m3"
@@ -110,11 +113,22 @@ def load_vlm(model_id: str):
     return processor, model
 
 
-def load_paddleocr() -> PaddleOCR:
-    # GPU(use_gpu=True)로 시도해봤으나 이 환경엔 paddlepaddle-gpu가 필요로 하는 cuDNN을
-    # 못 찾아서(PreconditionNotMet: cudnn_dso_handle) 매 요청마다 500 에러가 났음.
-    # cuDNN 경로 문제를 별도로 해결하기 전까진 CPU로 되돌림.
-    return PaddleOCR(use_angle_cls=True, lang="korean", use_gpu=False, show_log=False)
+def load_ocr() -> RapidOCR:
+    """PaddleOCR -> RapidOCR"""
+
+    return RapidOCR(params={
+        "EngineConfig.onnxruntime.intra_op_num_threads": 4,
+        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        "EngineConfig.onnxruntime.use_cuda": False,
+        "Det.engine_type": EngineType.ONNXRUNTIME,
+        "Det.lang_type": LangDet.CH,          # det는 언어 무관, ch 단일 모델
+        "Det.model_type": ModelType.MOBILE,
+        "Det.ocr_version": OCRVersion.PPOCRV5,
+        "Rec.engine_type": EngineType.ONNXRUNTIME,
+        "Rec.lang_type": LangRec.KOREAN,
+        "Rec.model_type": ModelType.MOBILE,
+        "Rec.ocr_version": OCRVersion.PPOCRV5,
+    })
 
 
 # ──────────────────────────────────────────────
@@ -207,34 +221,35 @@ class ObjectMapper:
 # ──────────────────────────────────────────────
 # OCR
 # ──────────────────────────────────────────────
-def _poly_bounds(poly):
-    """PaddleOCR 4점 폴리곤 → 축정렬 사각형 (xmin, ymin, xmax, ymax)."""
-    xs = [p[0] for p in poly]
-    ys = [p[1] for p in poly]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
 def _merge_same_line(lines, y_tol=10):
+    """같은 y대의 라인들을 좌→우로 병합. 입력/출력 모두 {text, score, bbox} 딕셔너리."""
     if not lines:
         return []
-    lines = sorted(lines, key=lambda x: x[0][0][1])
-    merged, cur_line = [], [lines[0]]
+
+    lines = sorted(lines, key=lambda d: d["bbox"][1])   # ymin 기준
+
+    merged, cur = [], [lines[0]]
     for line in lines[1:]:
-        if abs(line[0][0][1] - cur_line[-1][0][0][1]) < y_tol:
-            cur_line.append(line)
+        if abs(line["bbox"][1] - cur[-1]["bbox"][1]) < y_tol:
+            cur.append(line)
         else:
-            merged.append(cur_line)
-            cur_line = [line]
-    merged.append(cur_line)
+            merged.append(cur)
+            cur = [line]
+    merged.append(cur)
+
     result = []
     for grp in merged:
-        grp.sort(key=lambda x: x[0][0][0])
-        text = " ".join(w[1][0] for w in grp)
-        score = sum(w[1][1] for w in grp) / len(grp)
-        x0, y0, _, y1 = _poly_bounds(grp[0][0])
-        _, y2, x1, y3 = _poly_bounds(grp[-1][0])
-        bbox = [x0, min(y0, y2), x1, max(y1, y3)]
-        result.append({"text": text, "score": score, "bbox": bbox})
+        grp.sort(key=lambda d: d["bbox"][0])            # xmin 기준 좌→우
+        result.append({
+            "text": " ".join(d["text"] for d in grp),
+            "score": sum(d["score"] for d in grp) / len(grp),
+            "bbox": [
+                min(d["bbox"][0] for d in grp),
+                min(d["bbox"][1] for d in grp),
+                max(d["bbox"][2] for d in grp),
+                max(d["bbox"][3] for d in grp),
+            ],
+        })
     return result
 
 
@@ -244,7 +259,7 @@ def _merge_same_line(lines, y_tol=10):
 # IoU(위치)+CER(문자열 유사도)로 묶어 다수결 대표값을 뽑는다.
 # 호가창 가격처럼 실제로 매 프레임 바뀌는 숫자값은 클러스터링 대상에서 제외한다.
 # ──────────────────────────────────────────────
-IOU_THRESHOLD = 0.3
+IOU_THRESHOLD = 0.7
 CER_THRESHOLD = 0.5
 MAX_FRAME_GAP = 30
 TOP_N_CANDIDATES = 3
@@ -309,6 +324,29 @@ class _UnionFind:
         if ra != rb:
             self.parent[ra] = rb
 
+def run_ocr_on_frame(engine: RapidOCR, image: Image.Image) -> list: # RapidOCR 버전
+    """PIL(RGB) 프레임 하나에 대해 OCR을 실행, 라인 단위 검출 결과를 반환한다."""
+    bgr = np.array(image.convert("RGB"))[:, :, ::-1]
+
+    # bgr = correct_orientation(bgr)
+
+    res = engine(bgr)
+    if res is None or res.txts is None:
+        return []
+
+    lines = []
+    for text, score, box in zip(res.txts, res.scores, res.boxes):
+        if not text:
+            continue
+        pts = np.asarray(box, dtype=np.float32).reshape(-1, 2)
+        bbox = [
+            float(pts[:, 0].min()),   # x1
+            float(pts[:, 1].min()),   # y1
+            float(pts[:, 0].max()),   # x2
+            float(pts[:, 1].max()),   # y2
+        ]
+        lines.append({"text": text, "score": float(score), "bbox": bbox})
+    return lines
 
 def cluster_ocr_detections(detections: list) -> list:
     """서로 다른 프레임의 검출 중 bbox가 겹치고(IoU) 텍스트도 비슷한(CER) 것들을
@@ -409,19 +447,10 @@ def build_ocr_outputs(detections: list) -> tuple:
     ocr_spans.sort(key=lambda s: s["start"])
     return ocr_spans, ocr_candidates
 
-
-def run_paddleocr_on_frame(ocr: PaddleOCR, img: Image.Image):
-    arr = np.array(img.convert("RGB"))
-    res = ocr.ocr(arr, cls=True)
-    if not res or not res[0]:
-        return []
-    return [[r[0], r[1]] for r in res[0] if r[1][1] > 0.5]
-
-
-def _ocr_worker(ocr: PaddleOCR, frames: list, out: dict):
+def _ocr_worker(ocr: RapidOCR, frames: list, out: dict):
     detections, ocr_before = [], []
     for i, (sec, img) in enumerate(frames):
-        lines = _merge_same_line(run_paddleocr_on_frame(ocr, img))
+        lines = _merge_same_line(run_ocr_on_frame(ocr, img))
         ocr_before.append("\n".join(l["text"] for l in lines))
         for line in lines:
             detections.append({"frame_idx": i, "sec": sec,
@@ -547,7 +576,7 @@ def vlm_object_fallback(vlm_frames, processor, model, obj_mapper, device: str) -
     return list(detected)
 
 
-def run_ocr(ocr_frames, ocr: PaddleOCR) -> dict:
+def run_ocr(ocr_frames, ocr: RapidOCR) -> dict:
     ocr_out = {}
     _ocr_worker(ocr, ocr_frames, ocr_out)
     ocr_spans, ocr_candidates = build_ocr_outputs(ocr_out.get("detections", []))
@@ -580,37 +609,6 @@ def correct_ocr_text_with_vlm(processor, model, raw_text: str, device: str) -> s
         output_ids[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True
     )[0].strip()
     return corrected or raw_text
-
-
-def postprocess_ocr_with_vlm(processor, model, ocr_spans: list, device: str) -> list:
-    """v0.1의 postprocess_ocr_with_vlm 포팅 — 클러스터링된 OCR 타임라인 전체를
-    한 번에 VLM(텍스트 전용)에 넣어 오타/할루시네이션 교정, 문장 연결, 중복 병합."""
-    if not ocr_spans:
-        return ocr_spans
-    input_json = json.dumps(ocr_spans, ensure_ascii=False, indent=2)
-    prompt = (
-        "다음은 동영상에서 시간대별로 추출된 원시 OCR 텍스트의 JSON 배열이다.\n"
-        "1. 오타와 할루시네이션(무의미한 반복)을 교정하라.\n"
-        "2. 전체 전후 문맥을 파악하여 끊어진 문장을 자연스럽게 하나로 연결하라.\n"
-        "3. 같은 내용이 이어지는 경우 하나로 병합하고 start/end 업데이트.\n"
-        "4. @아이디, URL, 해시태그, 전화번호, 계좌번호 등 식별자는 원문 그대로 보존하라.\n"
-        "5. 오직 교정된 JSON 배열만 출력하라.\n\n"
-        f"[원본 타임라인 데이터]\n{input_json}"
-    )
-    messages = [{"role": "user", "content": prompt}]
-    text_input = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    inputs = processor(text=[text_input], return_tensors="pt").to(device)
-    with torch.inference_mode():
-        output_ids = model.generate(**inputs, max_new_tokens=2048, do_sample=False)
-    corrected = processor.batch_decode(
-        output_ids[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True
-    )[0].strip()
-    try:
-        m = re.search(r'\[\s*\{.*?\}\s*\]', corrected, re.DOTALL)
-        return json.loads(m.group(0) if m else corrected)
-    except Exception:
-        return ocr_spans  # 파싱 실패 시 교정 전 원본 유지
-
 
 # ──────────────────────────────────────────────
 # 영상 다운로드
@@ -655,7 +653,7 @@ def _get_image_frames(image: Image.Image) -> tuple:
 def _analyze_and_save(video_id, source, label, title, duration,
                        vlm_frames, dino_frames, ocr_frames,
                        processor, model,
-                       rag: CrimeRAG, ocr: PaddleOCR, args,
+                       rag: CrimeRAG, ocr: RapidOCR, args,
                        obj_mapper: ObjectMapper | None, t0: float,
                        is_sequence: bool = False) -> str | None:
     """1~3단계 분석(CoT 분류 → VLM closed-set 증거탐지 → 에스컬레이션 → OCR/객체/RAG) + 결과 저장.
@@ -730,7 +728,7 @@ def _analyze_and_save(video_id, source, label, title, duration,
             detail = {"ocr_before": ocr_before, "ocr_candidates": []}
         else:
             detail = run_ocr(ocr_frames, ocr)
-            corrected_ocr = postprocess_ocr_with_vlm(processor, model, detail["ocr_spans"], DEVICE)
+            corrected_ocr = detail["ocr_spans"] # VLM 기반 후처리 제외
         ocr_all = " | ".join(s["text"] for s in corrected_ocr)
 
         general_objs = vlm_object_fallback(vlm_frames, processor, model, obj_mapper, DEVICE)
@@ -763,7 +761,7 @@ def _analyze_and_save(video_id, source, label, title, duration,
 
 
 def process_single_video(url, label, processor, model,
-                          rag: CrimeRAG, ocr: PaddleOCR, args,
+                          rag: CrimeRAG, ocr: RapidOCR, args,
                           obj_mapper: ObjectMapper) -> str | None:
     """YouTube/TikTok URL 처리 — 다운로드 후 _analyze_and_save() 공통 로직 호출."""
     vid_m = re.search(r"(?:v=|video/|shorts/)([a-zA-Z0-9_-]+)", url)
@@ -792,7 +790,7 @@ def process_single_video(url, label, processor, model,
 
 
 def process_local_file(file_path: Path, label, processor, model,
-                        rag: CrimeRAG, ocr: PaddleOCR, args,
+                        rag: CrimeRAG, ocr: RapidOCR, args,
                         obj_mapper: ObjectMapper) -> str | None:
     """로컬 영상/이미지 파일 처리 — 다운로드 없이 파일에서 바로 프레임을 뽑아
     _analyze_and_save() 공통 로직 호출. 이미지는 시간 축이 없어 프레임 1장으로 취급."""
@@ -824,7 +822,7 @@ def process_local_file(file_path: Path, label, processor, model,
 
 
 def process_image_sequence(dir_path: Path, label, processor, model,
-                            rag: CrimeRAG, ocr: PaddleOCR, args,
+                            rag: CrimeRAG, ocr: RapidOCR, args,
                             obj_mapper: ObjectMapper) -> str | None:
     """이미지 시퀀스 폴더(예: 카톡 대화를 이어 찍은 스크린샷 여러 장) 처리.
     폴더 안 이미지들을 파일명 순으로 정렬해 하나의 프레임 시퀀스로 묶어 _analyze_and_save() 공통 로직 호출.
@@ -901,7 +899,7 @@ def main():
     processor, model = load_vlm(args.model)
 
     print("[2/3] OCR + RAG 로드...")
-    ocr = load_paddleocr()
+    ocr = load_ocr()
     rag = CrimeRAG(DEFAULT_DOCS_PATH)
     obj_mapper = ObjectMapper(rag.model)  # BGE-m3 + 427종 임베딩 — 일반객체 RAG-retrieval에도 재사용
 
