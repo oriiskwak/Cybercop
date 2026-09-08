@@ -1,4 +1,10 @@
 @echo off
-echo Installing dependencies...
-pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.org/simple
-echo Done!
+setlocal
+py -3.12 -m venv .venv
+if errorlevel 1 exit /b 1
+call .venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+if errorlevel 1 exit /b 1
+python -m pip install -r requirements.txt
+if errorlevel 1 exit /b 1
+echo CyberCOP dependencies installed.

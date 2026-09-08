@@ -34,8 +34,13 @@ data/thecheat_abnormal.csv
 # 서버/실행 로그
 *.log
 
-# 모델 캐시
+# 모델 캐시 (VLM/임베딩 가중치, 수십 GB — 코드가 아니라 다운로드로 재현)
 hf_models/
+hf_home/
+
+# 가상환경
+.venv/
+venv/
 
 # Python 캐시
 __pycache__/

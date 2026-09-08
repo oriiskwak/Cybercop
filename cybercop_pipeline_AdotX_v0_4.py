@@ -1,7 +1,14 @@
 """
-cybercop_pipeline_AdotX_v0_3.py — CoT 분류 + VLM closed-set 증거/객체 탐지 통합 파이프라인.
+cybercop_pipeline_AdotX_v0_4.py — CoT 분류 + VLM closed-set 증거/객체 탐지 + risk_agent 위험도/사기유형.
 
-v0.2 대비 변경점: Grounding DINO(사기증거)와 VLM 자유서술+임베딩매핑(일반객체)을
+v0.3 대비 변경점: 자체 RAG(BGE-m3 임베딩 + rag/retrieval_docs_v2.json 기반 범죄유형 매칭)를 제거하고,
+그 자리에 이미 완성되어 있는 별도 파이프라인(risk_agent_package)의 위험도(text_risk, S1~S6 가이드라인)와
+사기유형 분류를 인라인으로 연결했다 (text_risk.assess_risk() — 자세한 내용은 text_risk.py 참고).
+  - CrimeRAG 클래스/rag 필드 삭제. 다만 ObjectMapper(일반객체 427종 closed-set)는 BGE-m3 임베딩
+    자체는 계속 써야 해서, CrimeRAG 없이 SentenceTransformer를 직접 로드해 재사용한다.
+  - scam_evidence(사기증거 VLM 탐지) + should_escalate() 기반 final_label 에스컬레이션은 v0.3과
+    동일하게 유지 (RAG용이 아니라 사기/정상/검토필요 판정 보정용이라 그대로 둠).
+v0.2 대비 v0.3 변경점(그대로 유지됨): Grounding DINO(사기증거)와 VLM 자유서술+임베딩매핑(일반객체)을
 전부 VLM closed-set 방식으로 교체.
   - 사기증거(36종, pipeline/vocab.py): 프레임마다 VLM한테 어휘 전체를 보여주고 closed-set으로 확인
     (36개는 짧아서 청크 불필요 — 평가 결과 DINO 대비 F1 0%→58.8%)
@@ -12,7 +19,7 @@ v0.2 대비 변경점: Grounding DINO(사기증거)와 VLM 자유서술+임베�
     (평가 결과 F1 23.6%→36.5%, 호출 수는 오히려 자유서술 방식과 비슷).
   - Grounding DINO 로딩 자체를 제거해 GPU 메모리도 절약됨.
   - OCR 추출/VLM 교정 단계는 v0.2와 동일하게 유지 (실사용 리포트에 OCR 텍스트가 필요하므로).
-이 파일 실행에는 같은 저장소 루트의 pipeline/ 패키지가 필요합니다.
+이 파일 실행에는 같은 저장소 루트의 pipeline/ 패키지와 text_risk.py가 필요합니다.
 """
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -31,7 +38,6 @@ from collections import defaultdict
 import cv2
 import yt_dlp
 import numpy as np
-import faiss
 import torch
 from PIL import Image
 from transformers import AutoModelForMultimodalLM, AutoProcessor
@@ -41,6 +47,9 @@ from sentence_transformers import SentenceTransformer
 # PaddleOCR에서 RapidOCR로 교체
 import onnxruntime as ort
 from rapidocr import RapidOCR, EngineType, LangDet, LangRec, ModelType, OCRVersion
+
+# risk_agent 위험도/사기유형 분류 연결 (RAG 대체)
+from text_risk import assess_risk
 
 # 새 파이프라인 모듈
 from pipeline.frame_sampler import sample_uniform, sample_keyframe
@@ -56,7 +65,6 @@ MODEL_ID             = os.getenv("VLM_MODEL", "google/gemma-4-26B-A4B-it")
 DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
 TORCH_DTYPE         = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 DEFAULT_EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
-DEFAULT_DOCS_PATH   = os.getenv("RAG_DOCS_PATH", str(BASE_DIR / "rag" / "retrieval_docs_v2.json"))
 ALLOWED_OBJECTS_PATH = Path(os.getenv("ALLOWED_OBJECTS_PATH", str(BASE_DIR / "rag" / "allowed_objects.json")))
 MODEL_CACHE_DIR     = Path(os.getenv("MODEL_CACHE_DIR", str(BASE_DIR / "hf_models")))
 TRUST_REMOTE_CODE   = os.getenv("HF_TRUST_REMOTE_CODE", "0").lower() in {"1", "true", "yes"}
@@ -83,15 +91,17 @@ def format_ts(sec: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def print_report(final_label: str, reason: str, evidence: dict, rag_results: list) -> None:
+def print_report(final_label: str, reason: str, evidence: dict, risk_assessment: dict | None) -> None:
     """사람이 바로 읽을 수 있는 요약 출력. 결과 JSON 파일 내용/필드는 안 바뀜 — 콘솔 출력만 이 포맷."""
     objs = ", ".join(evidence.get("labels", {}).keys()) or "없음"
-    crime_type = rag_results[0]["major_category"] if rag_results else "—"
+    crime_type = "—"
+    if risk_assessment and risk_assessment.get("available"):
+        crime_type = risk_assessment.get("crime_classification", {}).get("top_crime_type") or "—"
     print(
         f"\n판정: {final_label}\n"
         f"근거 텍스트: {reason}\n"
         f"근거 객체(탐지): {objs}\n"
-        f"범죄 유형: {crime_type}\n"
+        f"범죄 유형(risk_agent): {crime_type}\n"
     )
 
 
@@ -147,58 +157,6 @@ def load_ocr() -> RapidOCR:
         "Rec.model_type": ModelType.MOBILE,
         "Rec.ocr_version": OCRVersion.PPOCRV5,
     })
-
-
-# ──────────────────────────────────────────────
-# RAG
-# ──────────────────────────────────────────────
-CRIME_RISK_MAP = {
-    # retrieval_docs_v2의 현재 범죄 분류 15종만 사용한다.
-    "사이버사기": {"months": 15.6, "risk": 0.28},
-    "사이버 금융범죄": {"months": 16.4, "risk": 0.30},
-    "개인·위치정보 침해": {"months": 12.3, "risk": 0.22},
-    "사이버 저작권 침해": {"months": 13.0, "risk": 0.24},
-    "사이버스팸메일": {"months": 12.0, "risk": 0.22},
-    "기타 정보통신망 이용 범죄": {"months": 7.0, "risk": 0.13},
-    "사이버성폭력": {"months": 25.3, "risk": 0.46},
-    "사이버도박": {"months": 13.8, "risk": 0.25},
-    "사이버 명예훼손·모욕": {"months": 8.0, "risk": 0.15},
-    "사이버스토킹": {"months": 11.0, "risk": 0.20},
-    "기타 불법 콘텐츠 범죄": {"months": 8.0, "risk": 0.15},
-    "해킹": {"months": 18.0, "risk": 0.33},
-    "서비스거부공격(DDoS)": {"months": 18.0, "risk": 0.33},
-    "악성프로그램": {"months": 18.0, "risk": 0.33},
-    "기타 정보통신망 침해형 범죄": {"months": 18.0, "risk": 0.33},
-}
-
-
-class CrimeRAG:
-    def __init__(self, docs_path: str, model_name: str = DEFAULT_EMBED_MODEL):
-        with open(docs_path, "r", encoding="utf-8") as f:
-            self.docs = json.load(f)
-        self.model = SentenceTransformer(model_name, device=DEVICE)
-        self.index = None
-
-    def build_index(self):
-        texts = [doc["text"] for doc in self.docs]
-        embs = self.model.encode(texts, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
-        self.index = faiss.IndexFlatIP(embs.shape[1])
-        self.index.add(embs)
-
-    def search(self, query: str, top_k: int = 3):
-        if not self.index:
-            self.build_index()
-        top_k = max(1, min(int(top_k), len(self.docs)))
-        q = self.model.encode([query], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
-        scores, indices = self.index.search(q, top_k)
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if 0 <= idx < len(self.docs):
-                doc = dict(self.docs[idx])
-                doc["similarity"] = float(score)
-                doc["risk_level"] = CRIME_RISK_MAP.get(doc.get("crime_type", ""), {}).get("risk", 0.0)
-                results.append(doc)
-        return results
 
 
 class ObjectMapper:
@@ -689,12 +647,12 @@ def _get_image_frames(image: Image.Image) -> tuple:
 def _analyze_and_save(video_id, source, label, title, duration,
                        vlm_frames, evidence_frames, ocr_frames,
                        processor, model,
-                       rag: CrimeRAG, ocr: RapidOCR, args,
+                       ocr: RapidOCR, args,
                        obj_mapper: ObjectMapper | None, t0: float,
                        is_sequence: bool = False) -> str | None:
-    """1~3단계 분석(CoT 분류 → VLM closed-set 증거탐지 → 에스컬레이션 → OCR/객체/RAG) + 결과 저장.
-    URL 기반(process_single_video)과 로컬 파일 기반(process_local_file)이 프레임만
-    각자 다르게 뽑아서 이 함수를 공통으로 호출한다."""
+    """1~3단계 분석(CoT 분류 → VLM closed-set 증거탐지 → 에스컬레이션 → OCR/객체 → risk_agent
+    위험도/사기유형) + 결과 저장. URL 기반(process_single_video)과 로컬 파일 기반(process_local_file)이
+    프레임만 각자 다르게 뽑아서 이 함수를 공통으로 호출한다."""
     res_dir   = ensure_dir(Path(args.out_dir) / "results")
     json_path = res_dir / f"ocr_results_{video_id}.json"
     try:
@@ -743,7 +701,6 @@ def _analyze_and_save(video_id, source, label, title, duration,
             "ocr":            [],
             "ocr_after":      "",
             "ocr_candidates": [],
-            "rag":            [],
             "total_inference_time": 0.0,
         }
 
@@ -753,7 +710,7 @@ def _analyze_and_save(video_id, source, label, title, duration,
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(base_payload, f, ensure_ascii=False, indent=2)
             print(f"  → {final_label} (skip detailed analysis)")
-            print_report(final_label, reason, evidence, [])
+            print_report(final_label, reason, evidence, None)
             return final_label
 
         # ── 3단계: 사기/검토필요 → OCR + 객체 탐지. 객체는 2단계 사기증거(36종, top_labels)와
@@ -780,9 +737,6 @@ def _analyze_and_save(video_id, source, label, title, duration,
 
         general_objs = vlm_object_fallback(vlm_frames, processor, model, obj_mapper, DEVICE)
         objects_out = list(dict.fromkeys(evidence["top_labels"] + general_objs))
-        obj_all = ", ".join(objects_out)
-
-        mapped  = rag.search(f"[OCR]: {ocr_all} | [Objects]: {obj_all}", top_k=args.top_k)
 
         full_payload = {
             **base_payload,
@@ -792,15 +746,21 @@ def _analyze_and_save(video_id, source, label, title, duration,
             "ocr":            corrected_ocr,
             "ocr_after":      ocr_all,
             "ocr_candidates": detail["ocr_candidates"],
-            "rag":            mapped,
             "skipped":        False,
             "total_inference_time": round(time.time() - t0, 2),
         }
+
+        # risk_agent 위험도/사기유형 분류 (예전 RAG 자리) — 사기/검토필요로 확정된 건에만 실행
+        risk_assessment = assess_risk(
+            full_payload, victim_count=args.victim_count, total_loss_won=args.total_loss_won
+        )
+        full_payload["risk_assessment"] = risk_assessment
+
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(full_payload, f, ensure_ascii=False, indent=2)
 
         print(f"  저장: {json_path}  ({time.time()-t0:.1f}s)")
-        print_report(final_label, reason, evidence, mapped)
+        print_report(final_label, reason, evidence, risk_assessment)
         return final_label
 
     except Exception as e:
@@ -810,7 +770,7 @@ def _analyze_and_save(video_id, source, label, title, duration,
 
 
 def process_single_video(url, label, processor, model,
-                          rag: CrimeRAG, ocr: RapidOCR, args,
+                          ocr: RapidOCR, args,
                           obj_mapper: ObjectMapper) -> str | None:
     """YouTube/TikTok URL 처리 — 다운로드 후 _analyze_and_save() 공통 로직 호출."""
     vid_m = re.search(r"(?:v=|video/|shorts/)([a-zA-Z0-9_-]+)", url)
@@ -836,11 +796,11 @@ def process_single_video(url, label, processor, model,
 
     return _analyze_and_save(video_id, url, label, title, duration,
                               vlm_frames, evidence_frames, ocr_frames,
-                              processor, model, rag, ocr, args, obj_mapper, t0)
+                              processor, model, ocr, args, obj_mapper, t0)
 
 
 def process_local_file(file_path: Path, label, processor, model,
-                        rag: CrimeRAG, ocr: RapidOCR, args,
+                        ocr: RapidOCR, args,
                         obj_mapper: ObjectMapper) -> str | None:
     """로컬 영상/이미지 파일 처리 — 다운로드 없이 파일에서 바로 프레임을 뽑아
     _analyze_and_save() 공통 로직 호출. 이미지는 시간 축이 없어 프레임 1장으로 취급."""
@@ -872,11 +832,11 @@ def process_local_file(file_path: Path, label, processor, model,
 
     return _analyze_and_save(video_id, str(file_path), label, file_path.name, duration,
                               vlm_frames, evidence_frames, ocr_frames,
-                              processor, model, rag, ocr, args, obj_mapper, t0)
+                              processor, model, ocr, args, obj_mapper, t0)
 
 
 def process_image_sequence(dir_path: Path, label, processor, model,
-                            rag: CrimeRAG, ocr: RapidOCR, args,
+                            ocr: RapidOCR, args,
                             obj_mapper: ObjectMapper) -> str | None:
     """이미지 시퀀스 폴더(예: 카톡 대화를 이어 찍은 스크린샷 여러 장) 처리.
     폴더 안 이미지들을 파일명 순으로 정렬해 하나의 프레임 시퀀스로 묶어 _analyze_and_save() 공통 로직 호출.
@@ -919,7 +879,7 @@ def process_image_sequence(dir_path: Path, label, processor, model,
 
     return _analyze_and_save(video_id, str(dir_path), label, dir_path.name, duration,
                               vlm_frames, all_frames, all_frames,
-                              processor, model, rag, ocr, args, obj_mapper, t0,
+                              processor, model, ocr, args, obj_mapper, t0,
                               is_sequence=True)
 
 
@@ -947,12 +907,15 @@ def main():
                         dest="max_evidence_frames", type=int, default=15,
                         help="VLM 증거 탐지에 넘길 최대 프레임 수")
     parser.add_argument("--escalate_thr",         type=float, default=ESCALATE_THR)
-    parser.add_argument("--top_k",                type=int,   default=3)
+    parser.add_argument("--victim_count",         type=int,   default=None,
+                        help="risk_assessment용 피해자 수 수동 override (미지정 시 0=정보없음)")
+    parser.add_argument("--total_loss_won",       type=int,   default=None,
+                        help="risk_assessment용 총 피해금액(원) 수동 override (미지정 시 OCR에서 추출 시도)")
     args = parser.parse_args()
     if min(args.sample_sec, args.scan_sec, args.evidence_sec) <= 0:
         parser.error("샘플링 간격은 0보다 커야 합니다.")
-    if min(args.max_frames, args.max_vlm_frames, args.max_evidence_frames, args.top_k) <= 0:
-        parser.error("프레임 수와 top_k는 0보다 커야 합니다.")
+    if min(args.max_frames, args.max_vlm_frames, args.max_evidence_frames) <= 0:
+        parser.error("프레임 수는 0보다 커야 합니다.")
     if not 0.0 <= args.escalate_thr <= 1.0:
         parser.error("--escalate_thr는 0~1 범위여야 합니다.")
 
@@ -961,17 +924,17 @@ def main():
     print("[1/3] VLM 로드...")
     processor, model = load_vlm(args.model)
 
-    print("[2/3] OCR + RAG 로드...")
+    print("[2/3] OCR + 임베딩 로드...")
     ocr = load_ocr()
-    rag = CrimeRAG(DEFAULT_DOCS_PATH)
-    obj_mapper = ObjectMapper(rag.model)  # BGE-m3 + 427종 임베딩 — 일반객체 RAG-retrieval에도 재사용
+    embed_model = SentenceTransformer(DEFAULT_EMBED_MODEL, device=DEVICE)
+    obj_mapper = ObjectMapper(embed_model)  # BGE-m3 + 427종 임베딩 — 일반객체 retrieval용
 
     print("[3/3] 처리 시작...")
 
     preds = []
     failed = 0
     if args.url:
-        pred = process_single_video(args.url, "manual", processor, model, rag, ocr, args, obj_mapper)
+        pred = process_single_video(args.url, "manual", processor, model, ocr, args, obj_mapper)
         if pred:
             preds.append(("unknown", pred))
         else:
@@ -981,7 +944,7 @@ def main():
         if not file_path.is_file():
             print(f"\n[Error] 파일을 찾을 수 없습니다: {args.file}")
             sys.exit(1)
-        pred = process_local_file(file_path, "manual", processor, model, rag, ocr, args, obj_mapper)
+        pred = process_local_file(file_path, "manual", processor, model, ocr, args, obj_mapper)
         if pred:
             preds.append(("unknown", pred))
         else:
@@ -998,7 +961,7 @@ def main():
             sys.exit(1)
         print(f"  총 {len(files)}개 파일 발견")
         for f in files:
-            pred = process_local_file(f, "manual", processor, model, rag, ocr, args, obj_mapper)
+            pred = process_local_file(f, "manual", processor, model, ocr, args, obj_mapper)
             if pred:
                 preds.append(("unknown", pred))
             else:
@@ -1008,7 +971,7 @@ def main():
         if not seq_path.is_dir():
             print(f"\n[Error] 디렉토리를 찾을 수 없습니다: {args.seq_dir}")
             sys.exit(1)
-        pred = process_image_sequence(seq_path, "manual", processor, model, rag, ocr, args, obj_mapper)
+        pred = process_image_sequence(seq_path, "manual", processor, model, ocr, args, obj_mapper)
         if pred:
             preds.append(("unknown", pred))
         else:
@@ -1019,7 +982,7 @@ def main():
                 url = row.get("link") or row.get("url")
                 gt  = row.get("label", "unknown")
                 if url:
-                    pred = process_single_video(url, gt, processor, model, rag, ocr, args, obj_mapper)
+                    pred = process_single_video(url, gt, processor, model, ocr, args, obj_mapper)
                     if pred is not None and gt in ("abnormal", "normal"):
                         preds.append((gt, pred))
                     elif pred is None:

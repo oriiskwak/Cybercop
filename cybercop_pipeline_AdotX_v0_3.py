@@ -3,8 +3,8 @@ cybercop_pipeline_AdotX_v0_3.py — CoT 분류 + VLM closed-set 증거/객체 �
 
 v0.2 대비 변경점: Grounding DINO(사기증거)와 VLM 자유서술+임베딩매핑(일반객체)을
 전부 VLM closed-set 방식으로 교체.
-  - 사기증거(34종, pipeline/vocab.py): 프레임마다 VLM한테 어휘 전체를 보여주고 closed-set으로 확인
-    (34개는 짧아서 청크 불필요 — 평가 결과 DINO 대비 F1 0%→58.8%)
+  - 사기증거(36종, pipeline/vocab.py): 프레임마다 VLM한테 어휘 전체를 보여주고 closed-set으로 확인
+    (36개는 짧아서 청크 불필요 — 평가 결과 DINO 대비 F1 0%→58.8%)
   - 일반객체(427종, rag/allowed_objects.json): "짧은 장면묘사 → BGE-m3(이미 로드된 ObjectMapper
     재사용)로 top-K(40개) 후보 retrieval → 그 후보만으로 closed-set 확인" 3단계.
     427개를 한 번에/청크로 다 주면 모델이 목록을 그대로 반복 생성하는 할루시네이션이 발생해서
@@ -16,11 +16,8 @@ v0.2 대비 변경점: Grounding DINO(사기증거)와 VLM 자유서술+임베�
 """
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# PaddleOCR(PaddleX)가 이미 캐시된 모델도 매번 온라인으로 재확인하려다가, 이 환경의 불안정한
-# 네트워크(커넥션이 CLOSE-WAIT로 죽은 채 타임아웃 없이 멈춤) 때문에 수십 분씩 멎는 문제가 있었음.
-# 필요한 모델(VLM/DINO/PaddleOCR)은 이미 전부 로컬에 있으므로 오프라인 모드를 기본값으로 강제.
-# 최초 설치 시 모델을 새로 받아야 한다면 실행 전 `export HF_HUB_OFFLINE=0`으로 풀 것.
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# 새 배포 환경은 최초 실행 때 Hugging Face 모델을 내려받아야 한다. 완전히 캐시된
+# 환경에서만 사용자가 명시적으로 HF_HUB_OFFLINE=1을 설정한다.
 
 import sys
 import re
@@ -37,7 +34,7 @@ import numpy as np
 import faiss
 import torch
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForMultimodalLM, AutoProcessor
 from huggingface_hub import snapshot_download
 from sentence_transformers import SentenceTransformer
 
@@ -54,18 +51,22 @@ from pipeline.vocab import SCAM_EVIDENCE_VOCAB  # {한국어: 영어} — v0.3�
 # ──────────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────────
-MODEL_ID            = os.getenv("VLM_MODEL", "google/gemma-4-E2B-it") # 최초 테스트 시 export HF_HUB_OFFLINE=0, "skt/A.X-4.0-VL-Light"
+BASE_DIR             = Path(__file__).resolve().parent
+MODEL_ID             = os.getenv("VLM_MODEL", "google/gemma-4-26B-A4B-it")
 DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
 TORCH_DTYPE         = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-DEFAULT_EMBED_MODEL = "BAAI/bge-m3"
-DEFAULT_DOCS_PATH   = str(Path(__file__).parent / "rag" / "retrieval_docs_v2.json")
-ALLOWED_OBJECTS_PATH = Path(__file__).parent / "rag" / "allowed_objects.json"
+DEFAULT_EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
+DEFAULT_DOCS_PATH   = os.getenv("RAG_DOCS_PATH", str(BASE_DIR / "rag" / "retrieval_docs_v2.json"))
+ALLOWED_OBJECTS_PATH = Path(os.getenv("ALLOWED_OBJECTS_PATH", str(BASE_DIR / "rag" / "allowed_objects.json")))
+MODEL_CACHE_DIR     = Path(os.getenv("MODEL_CACHE_DIR", str(BASE_DIR / "hf_models")))
+TRUST_REMOTE_CODE   = os.getenv("HF_TRUST_REMOTE_CODE", "0").lower() in {"1", "true", "yes"}
+VLM_GPU_RESERVE_GIB = max(float(os.getenv("VLM_GPU_RESERVE_GIB", "4")), 0.0)
 
-SCAM_EVIDENCE_LABELS = list(SCAM_EVIDENCE_VOCAB.keys())  # 34종
+SCAM_EVIDENCE_LABELS = list(SCAM_EVIDENCE_VOCAB.keys())  # 36종
 OBJECT_RAG_TOP_K = 40  # 평가 결과 40과 60이 F1 거의 동일(36.5% vs 36.0%)해서 더 짧은 40 채택
 
-# Grounding DINO 에스컬레이션 임계값
-# CoT="정상"이라도 evidence_score >= 이 값이면 "검토필요" 로 표시
+# VLM 증거 점수 에스컬레이션 임계값. CoT="정상"이라도 evidence_score가
+# 이 값 이상이면 "검토필요"로 표시한다.
 ESCALATE_THR = 0.15
 
 # ──────────────────────────────────────────────
@@ -102,13 +103,30 @@ def load_vlm(model_id: str):
         local_dir = Path(model_id)
     else:
         safe_name = model_id.replace("/", "_").replace(".", "_")
-        local_dir = Path("./hf_models") / safe_name
-        if not local_dir.exists():
-            snapshot_download(repo_id=model_id, local_dir=str(local_dir))
-    processor = AutoProcessor.from_pretrained(str(local_dir), trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        str(local_dir), torch_dtype=TORCH_DTYPE, device_map=DEVICE, trust_remote_code=True,
+        local_dir = MODEL_CACHE_DIR / safe_name
+        if not (local_dir / "config.json").is_file():
+            try:
+                snapshot_download(repo_id=model_id, local_dir=str(local_dir))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"VLM 모델을 준비하지 못했습니다: {model_id}. "
+                    "네트워크/Hugging Face 접근 권한을 확인하거나 MODEL_CACHE_DIR에 모델을 미리 받으세요."
+                ) from exc
+    processor = AutoProcessor.from_pretrained(
+        str(local_dir), trust_remote_code=TRUST_REMOTE_CODE
     )
+    model_kwargs = {
+        "dtype": TORCH_DTYPE,
+        "device_map": "auto" if DEVICE == "cuda" else "cpu",
+        "trust_remote_code": TRUST_REMOTE_CODE,
+    }
+    if DEVICE == "cuda" and VLM_GPU_RESERVE_GIB:
+        reserve_bytes = int(VLM_GPU_RESERVE_GIB * 1024**3)
+        model_kwargs["max_memory"] = {
+            index: max(torch.cuda.mem_get_info(index)[0] - reserve_bytes, 1024**3)
+            for index in range(torch.cuda.device_count())
+        }
+    model = AutoModelForMultimodalLM.from_pretrained(str(local_dir), **model_kwargs)
     model.eval()
     return processor, model
 
@@ -170,6 +188,7 @@ class CrimeRAG:
     def search(self, query: str, top_k: int = 3):
         if not self.index:
             self.build_index()
+        top_k = max(1, min(int(top_k), len(self.docs)))
         q = self.model.encode([query], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
         scores, indices = self.index.search(q, top_k)
         results = []
@@ -184,7 +203,7 @@ class CrimeRAG:
 
 class ObjectMapper:
     """VLM 폴백(vlm_object_fallback)이 자유롭게 뱉은 객체명을 rag/allowed_objects.json의
-    고정 어휘(439종)로 정규화. 나중에 정확도 검증/분석할 때 열린 어휘가 아니라 고정된 클래스
+    고정 어휘(427종)로 정규화. 나중에 정확도 검증/분석할 때 열린 어휘가 아니라 고정된 클래스
     기준으로 볼 수 있게 하기 위함 — DINO의 top_labels(SCAM_EVIDENCE_VOCAB)에는 적용하지 않음
     (성격이 다른 별개 어휘라 섞으면 오히려 의미가 흐려짐)."""
 
@@ -194,7 +213,8 @@ class ObjectMapper:
         # "앱"→"텔레그램 앱"(0.73), "확인"→"인증"(0.77) 같은 정상 매핑은 유지됨.
         self.model = embed_model
         self.threshold = threshold
-        self.allowed = json.load(open(ALLOWED_OBJECTS_PATH, encoding="utf-8"))
+        with open(ALLOWED_OBJECTS_PATH, encoding="utf-8") as f:
+            self.allowed = json.load(f)
         self.embeddings = self.model.encode(
             self.allowed, convert_to_numpy=True, normalize_embeddings=True
         ).astype("float32")
@@ -479,7 +499,7 @@ def _parse_bracket_list(raw: str, tag: str, allowed: set) -> list:
 
 
 # ──────────────────────────────────────────────
-# 사기증거(34종) — closed-set. 34개는 짧아서 청크/retrieval 없이 한 번에 프롬프트에 다 넣어도
+# 사기증거(36종) — closed-set. 36개는 짧아서 청크/retrieval 없이 한 번에 프롬프트에 다 넣어도
 # 할루시네이션이 안 남 (평가로 확인됨). Grounding DINO의 frame_dets/aggregate() 자리를 대체.
 # ──────────────────────────────────────────────
 def _scam_evidence_prompt() -> str:
@@ -503,9 +523,13 @@ def vlm_scam_evidence_batch(frames, processor, model, device: str, video_duratio
     n_frames = len(frames)
     label_secs: dict[str, list] = defaultdict(list)
 
+    detected_frame_count = 0
     for sec, img in frames:
         raw = _vlm_generate(processor, model, img, prompt, device, max_new_tokens=150)
-        for lb in _parse_bracket_list(raw, "EVIDENCE", set(SCAM_EVIDENCE_LABELS)):
+        detected_labels = _parse_bracket_list(raw, "EVIDENCE", set(SCAM_EVIDENCE_LABELS))
+        if detected_labels:
+            detected_frame_count += 1
+        for lb in detected_labels:
             label_secs[lb].append(sec)
 
     half = video_duration / 2.0
@@ -525,7 +549,8 @@ def vlm_scam_evidence_batch(frames, processor, model, device: str, video_duratio
             "segment": segment,
         }
 
-    n_detected = sum(1 for lb in labels_summary.values() if lb["frame_count"] > 0)
+    # 증거가 하나 이상 나온 프레임 수다. 레이블 종류 수와 혼동하지 않는다.
+    n_detected = detected_frame_count
     # 서로 다른 증거 종류가 많이/자주 나올수록 evidence_score를 높임 (연속 score가 없어서 근사치)
     evidence_score = min(1.0, sum(lb["frame_ratio"] for lb in labels_summary.values()) / 2) if labels_summary else 0.0
     top_labels = sorted(labels_summary, key=lambda lb: labels_summary[lb]["frame_ratio"], reverse=True)[:5]
@@ -636,12 +661,23 @@ def _get_video_frames(v_path: Path, args) -> tuple:
     """비디오 파일(로컬 경로, URL이든 다운로드 후든 동일)에서 1~3단계에 필요한
     프레임 세트와 재생시간을 뽑는다. URL/로컬 파일 공통 사용."""
     cap = cv2.VideoCapture(str(v_path))
-    duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / (cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    if not cap.isOpened():
+        cap.release()
+        raise ValueError(f"비디오를 열 수 없습니다: {v_path}")
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
     cap.release()
-    vlm_frames  = sample_keyframe(v_path, args.scan_sec, args.max_vlm_frames)
-    dino_frames = sample_uniform(v_path, every_n=args.dino_sec, max_frames=args.max_dino_frames)
-    ocr_frames  = sample_uniform(v_path, args.sample_sec, args.max_frames)
-    return duration, vlm_frames, dino_frames, ocr_frames
+    if frame_count <= 0 or fps <= 0:
+        raise ValueError(f"유효한 비디오 프레임/FPS가 없습니다: {v_path}")
+    duration = frame_count / fps
+    vlm_frames = sample_keyframe(v_path, args.scan_sec, args.max_vlm_frames)
+    evidence_frames = sample_uniform(
+        v_path, every_n=args.evidence_sec, max_frames=args.max_evidence_frames
+    )
+    ocr_frames = sample_uniform(v_path, args.sample_sec, args.max_frames)
+    if not vlm_frames or not evidence_frames:
+        raise ValueError(f"비디오에서 분석 프레임을 추출하지 못했습니다: {v_path}")
+    return duration, vlm_frames, evidence_frames, ocr_frames
 
 
 def _get_image_frames(image: Image.Image) -> tuple:
@@ -651,7 +687,7 @@ def _get_image_frames(image: Image.Image) -> tuple:
 
 
 def _analyze_and_save(video_id, source, label, title, duration,
-                       vlm_frames, dino_frames, ocr_frames,
+                       vlm_frames, evidence_frames, ocr_frames,
                        processor, model,
                        rag: CrimeRAG, ocr: RapidOCR, args,
                        obj_mapper: ObjectMapper | None, t0: float,
@@ -668,8 +704,8 @@ def _analyze_and_save(video_id, source, label, title, duration,
         reason = reason_m.group(1).strip() if reason_m else cls_summary[:80]
         print(f"  [분류]  {cls_label}  | 판단근거: {reason}")
 
-        # ── 2단계: VLM closed-set(34종) — 모든 영상에서 증거 탐지 (정상 판정도 에스컬레이션 체크 위해 실행) ──
-        evidence = vlm_scam_evidence_batch(dino_frames, processor, model, DEVICE, video_duration=duration)
+        # ── 2단계: VLM closed-set(36종) — 모든 영상에서 증거 탐지 (정상 판정도 에스컬레이션 체크 위해 실행) ──
+        evidence = vlm_scam_evidence_batch(evidence_frames, processor, model, DEVICE, video_duration=duration)
         print(f"  [사기증거] score={evidence['evidence_score']:.3f}"
               f"  top={evidence['top_labels'][:3]}")
 
@@ -680,7 +716,10 @@ def _analyze_and_save(video_id, source, label, title, duration,
         # 과탐지가 낫다"는 원래 설계 원칙에 정면으로 위배되기 때문 — 대신 "검토필요"로만 내려서
         # 사람이 한 번 더 보게 함.
         final_label = cls_label
-        if cls_label == "정상" and should_escalate(evidence, threshold=args.escalate_thr):
+        if cls_label == "불명확":
+            final_label = "검토필요"
+            print("  [에스컬레이션] 분류 출력 파싱 실패 → 검토필요")
+        elif cls_label == "정상" and should_escalate(evidence, threshold=args.escalate_thr):
             final_label = "검토필요"
             print(f"  [에스컬레이션] 정상 → 검토필요"
                   f"  (evidence_score={evidence['evidence_score']:.3f} >= {args.escalate_thr})")
@@ -695,21 +734,29 @@ def _analyze_and_save(video_id, source, label, title, duration,
             "title":          title,
             "label":          label,           # GT (CSV/--dir 등에서 받은 것)
             "cls_label":      cls_label,        # 체크리스트 판단
-            "final_label":    final_label,     # 최종 판단 (DINO 에스컬레이션 포함)
+            "final_label":    final_label,     # 최종 판단 (VLM 증거 에스컬레이션 포함)
             "classify_summary": cls_summary,
             "grounding":      evidence,
-            "total_inference_time": round(time.time() - t0, 2),
+            "objects":        [],
+            "scam_evidence":  evidence["top_labels"],
+            "ocr_before":     [],
+            "ocr":            [],
+            "ocr_after":      "",
+            "ocr_candidates": [],
+            "rag":            [],
+            "total_inference_time": 0.0,
         }
 
         if final_label not in ("사기", "검토필요"):
             base_payload["skipped"] = True
+            base_payload["total_inference_time"] = round(time.time() - t0, 2)
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(base_payload, f, ensure_ascii=False, indent=2)
             print(f"  → {final_label} (skip detailed analysis)")
             print_report(final_label, reason, evidence, [])
             return final_label
 
-        # ── 3단계: 사기/검토필요 → OCR + 객체 탐지. 객체는 2단계 사기증거(34종, top_labels)와
+        # ── 3단계: 사기/검토필요 → OCR + 객체 탐지. 객체는 2단계 사기증거(36종, top_labels)와
         # 일반객체(427종, RAG-retrieval closed-set)를 합침 — 사기로 확정된 영상은 증거를
         # 최대한 남기기 위해 둘 다 사용 (정상은 위에서 이미 스킵되므로 비용 문제 없음) ──
         if is_sequence:
@@ -746,6 +793,8 @@ def _analyze_and_save(video_id, source, label, title, duration,
             "ocr_after":      ocr_all,
             "ocr_candidates": detail["ocr_candidates"],
             "rag":            mapped,
+            "skipped":        False,
+            "total_inference_time": round(time.time() - t0, 2),
         }
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(full_payload, f, ensure_ascii=False, indent=2)
@@ -771,21 +820,22 @@ def process_single_video(url, label, processor, model,
 
     if json_path.exists():
         print(f"  [Skip] {video_id}")
-        return None
+        with open(json_path, encoding="utf-8") as f:
+            return json.load(f).get("final_label")
 
     print(f"  [Processing] {url}  (label={label})")
     t0 = time.time()
     try:
         v_path, info = download_video(url, Path(args.out_dir))
         title = info.get("title", "")
-        duration, vlm_frames, dino_frames, ocr_frames = _get_video_frames(v_path, args)
+        duration, vlm_frames, evidence_frames, ocr_frames = _get_video_frames(v_path, args)
     except Exception as e:
         print(f"  [Error] {url}: {e}")
         import traceback; traceback.print_exc()
         return None
 
     return _analyze_and_save(video_id, url, label, title, duration,
-                              vlm_frames, dino_frames, ocr_frames,
+                              vlm_frames, evidence_frames, ocr_frames,
                               processor, model, rag, ocr, args, obj_mapper, t0)
 
 
@@ -795,29 +845,33 @@ def process_local_file(file_path: Path, label, processor, model,
     """로컬 영상/이미지 파일 처리 — 다운로드 없이 파일에서 바로 프레임을 뽑아
     _analyze_and_save() 공통 로직 호출. 이미지는 시간 축이 없어 프레임 1장으로 취급."""
     ext = file_path.suffix.lower()
+    if ext not in VIDEO_EXTS | IMAGE_EXTS:
+        print(f"  [Error] 지원하지 않는 파일 형식: {ext or '(확장자 없음)'}")
+        return None
     video_id = file_path.stem
     res_dir   = ensure_dir(Path(args.out_dir) / "results")
     json_path = res_dir / f"ocr_results_{video_id}.json"
 
     if json_path.exists():
         print(f"  [Skip] {video_id}")
-        return None
+        with open(json_path, encoding="utf-8") as f:
+            return json.load(f).get("final_label")
 
     print(f"  [Processing] {file_path.name}  (label={label})")
     t0 = time.time()
     try:
         if ext in IMAGE_EXTS:
             image = Image.open(file_path).convert("RGB")
-            duration, vlm_frames, dino_frames, ocr_frames = _get_image_frames(image)
+            duration, vlm_frames, evidence_frames, ocr_frames = _get_image_frames(image)
         else:
-            duration, vlm_frames, dino_frames, ocr_frames = _get_video_frames(file_path, args)
+            duration, vlm_frames, evidence_frames, ocr_frames = _get_video_frames(file_path, args)
     except Exception as e:
         print(f"  [Error] {file_path.name}: {e}")
         import traceback; traceback.print_exc()
         return None
 
     return _analyze_and_save(video_id, str(file_path), label, file_path.name, duration,
-                              vlm_frames, dino_frames, ocr_frames,
+                              vlm_frames, evidence_frames, ocr_frames,
                               processor, model, rag, ocr, args, obj_mapper, t0)
 
 
@@ -833,7 +887,8 @@ def process_image_sequence(dir_path: Path, label, processor, model,
 
     if json_path.exists():
         print(f"  [Skip] {video_id}")
-        return None
+        with open(json_path, encoding="utf-8") as f:
+            return json.load(f).get("final_label")
 
     image_files = sorted(f for f in dir_path.iterdir() if f.suffix.lower() in IMAGE_EXTS)
     if not image_files:
@@ -873,25 +928,33 @@ def process_image_sequence(dir_path: Path, label, processor, model,
 # ──────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="cybercop pipeline AdotX_v0_3 — CoT + VLM closed-set 증거/객체 탐지")
-    parser.add_argument("--url",                  help="단일 URL")
-    parser.add_argument("--file",                 help="단일 로컬 영상/이미지 파일 경로")
-    parser.add_argument("--dir",                  help="영상/이미지 파일이 담긴 디렉토리 경로 (파일마다 독립 판정)")
-    parser.add_argument("--seq_dir",              help="이어지는 이미지 시퀀스가 담긴 디렉토리 경로 (폴더 전체를 한 건으로 판정)")
-    parser.add_argument("--csv",                  default=str(Path(__file__).parent / "data" / "labels.csv"))
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--url",                  help="단일 YouTube/TikTok URL")
+    inputs.add_argument("--file",                 help="단일 로컬 영상/이미지 파일 경로")
+    inputs.add_argument("--dir",                  help="영상/이미지 파일 디렉토리 (파일마다 독립 판정)")
+    inputs.add_argument("--seq_dir",              help="이어지는 이미지 시퀀스 디렉토리 (전체를 한 건으로 판정)")
+    inputs.add_argument("--csv",                  help="label/link 또는 label/url 컬럼 CSV")
     parser.add_argument("--out_dir",              default="./output_AdotX_v0.3")
     parser.add_argument("--model",                default=MODEL_ID)
     parser.add_argument("--sample_sec",           type=float, default=2.0)
     parser.add_argument("--max_frames",           type=int,   default=1000)
     parser.add_argument("--scan_sec",             type=float, default=0.5)
     parser.add_argument("--max_vlm_frames",       type=int,   default=4)
-    # DINO는 싸고 빠르므로 VLM보다 더 촘촘하게 샘플링
-    parser.add_argument("--dino_sec",             type=float, default=3.0,
-                        help="DINO용 균등 샘플링 간격(초). VLM보다 촘촘해도 됨")
-    parser.add_argument("--max_dino_frames",      type=int,   default=15,
-                        help="DINO에 넘길 최대 프레임 수")
+    parser.add_argument("--evidence_sec", "--dino_sec", dest="evidence_sec",
+                        type=float, default=3.0,
+                        help="VLM 증거 탐지용 균등 샘플링 간격(초)")
+    parser.add_argument("--max_evidence_frames", "--max_dino_frames",
+                        dest="max_evidence_frames", type=int, default=15,
+                        help="VLM 증거 탐지에 넘길 최대 프레임 수")
     parser.add_argument("--escalate_thr",         type=float, default=ESCALATE_THR)
     parser.add_argument("--top_k",                type=int,   default=3)
     args = parser.parse_args()
+    if min(args.sample_sec, args.scan_sec, args.evidence_sec) <= 0:
+        parser.error("샘플링 간격은 0보다 커야 합니다.")
+    if min(args.max_frames, args.max_vlm_frames, args.max_evidence_frames, args.top_k) <= 0:
+        parser.error("프레임 수와 top_k는 0보다 커야 합니다.")
+    if not 0.0 <= args.escalate_thr <= 1.0:
+        parser.error("--escalate_thr는 0~1 범위여야 합니다.")
 
     ensure_dir(args.out_dir)
 
@@ -906,10 +969,13 @@ def main():
     print("[3/3] 처리 시작...")
 
     preds = []
+    failed = 0
     if args.url:
         pred = process_single_video(args.url, "manual", processor, model, rag, ocr, args, obj_mapper)
         if pred:
             preds.append(("unknown", pred))
+        else:
+            failed += 1
     elif args.file:
         file_path = Path(args.file)
         if not file_path.is_file():
@@ -918,6 +984,8 @@ def main():
         pred = process_local_file(file_path, "manual", processor, model, rag, ocr, args, obj_mapper)
         if pred:
             preds.append(("unknown", pred))
+        else:
+            failed += 1
     elif args.dir:
         dir_path = Path(args.dir)
         if not dir_path.is_dir():
@@ -933,6 +1001,8 @@ def main():
             pred = process_local_file(f, "manual", processor, model, rag, ocr, args, obj_mapper)
             if pred:
                 preds.append(("unknown", pred))
+            else:
+                failed += 1
     elif args.seq_dir:
         seq_path = Path(args.seq_dir)
         if not seq_path.is_dir():
@@ -941,6 +1011,8 @@ def main():
         pred = process_image_sequence(seq_path, "manual", processor, model, rag, ocr, args, obj_mapper)
         if pred:
             preds.append(("unknown", pred))
+        else:
+            failed += 1
     elif args.csv:
         with open(args.csv, "r", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
@@ -950,21 +1022,28 @@ def main():
                     pred = process_single_video(url, gt, processor, model, rag, ocr, args, obj_mapper)
                     if pred is not None and gt in ("abnormal", "normal"):
                         preds.append((gt, pred))
+                    elif pred is None:
+                        failed += 1
 
-    if preds:
+    eval_preds = [(gt, pred) for gt, pred in preds if gt in ("abnormal", "normal")]
+    if eval_preds:
         # "검토필요"를 사기로 간주해서 성능 계산
         def is_scam(p): return p in ("사기", "검토필요")
-        tp = sum(1 for gt, p in preds if is_scam(p) and gt == "abnormal")
-        fp = sum(1 for gt, p in preds if is_scam(p) and gt == "normal")
-        fn = sum(1 for gt, p in preds if not is_scam(p) and gt == "abnormal")
-        tn = sum(1 for gt, p in preds if not is_scam(p) and gt == "normal")
+        tp = sum(1 for gt, p in eval_preds if is_scam(p) and gt == "abnormal")
+        fp = sum(1 for gt, p in eval_preds if is_scam(p) and gt == "normal")
+        fn = sum(1 for gt, p in eval_preds if not is_scam(p) and gt == "abnormal")
+        tn = sum(1 for gt, p in eval_preds if not is_scam(p) and gt == "normal")
         rec  = tp / (tp + fn) * 100 if (tp + fn) > 0 else 0.0
         prec = tp / (tp + fp) * 100 if (tp + fp) > 0 else 0.0
         f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
         print(f"\n{'='*50}")
-        print(f"  [성능] n={len(preds)}  TP={tp} TN={tn} FP={fp} FN={fn}")
+        print(f"  [성능] n={len(eval_preds)}  TP={tp} TN={tn} FP={fp} FN={fn}")
         print(f"  Recall={rec:.1f}%  Precision={prec:.1f}%  F1={f1:.1f}%")
         print(f"{'='*50}")
+
+    if failed:
+        print(f"\n[Error] {failed}건의 분석이 실패했습니다.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
