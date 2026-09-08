@@ -78,19 +78,17 @@ def build_statement_text(payload: dict) -> str:
     """Cybercop 결과 dict에서 risk_agent 모델 입력용 진술 텍스트를 구성한다.
 
     risk_api.py의 _build_statement_text()와 같은 접근(여러 필드를 한국어 문장 조각으로 이어붙임)을
-    Cybercop 스키마(classify_summary/final_label/cls_label/objects/scam_evidence/ocr_after)에
-    맞게 재작성.
+    Cybercop 스키마(classify_summary/objects/scam_evidence/ocr_after)에 맞게 재작성.
+
+    cls_label/final_label(우리 자체 판정)은 의도적으로 제외한다 — assess_risk()는 final_label이
+    "사기"/"검토필요"일 때만 호출되므로 이 값은 항상 같은 결과("의심됨")만 반복해 정보량이 없고,
+    S3~S6가 실제 증거 대신 판정 문구 자체에 끌려 편향될 위험이 있다. 순수 증거만 넘긴다.
     """
     parts: list[str] = []
 
     classify_summary = payload.get("classify_summary")
     if classify_summary:
         parts.append(str(classify_summary).strip())
-
-    cls_label = payload.get("cls_label")
-    final_label = payload.get("final_label")
-    if cls_label or final_label:
-        parts.append(f"판정 {cls_label or ''} (최종 {final_label or ''})".strip())
 
     objects = payload.get("objects") or []
     if objects:
