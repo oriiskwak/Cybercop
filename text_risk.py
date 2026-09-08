@@ -74,6 +74,16 @@ def _ensure_loaded() -> None:
 # ──────────────────────────────────────────────
 # 진술 텍스트 빌더
 # ──────────────────────────────────────────────
+def _general_objects(payload: dict) -> list[str]:
+    """payload["objects"]는 Cybercop 안에서 이미 scam_evidence ∪ 일반객체로 합쳐져 있다
+    (cybercop_pipeline_AdotX_v0_4.py의 objects_out). scam_evidence는 별도 필드로 이미 넘기므로,
+    여기서는 겹치는 항목을 빼고 순수 일반객체만 돌려준다 — 안 그러면 같은 단어가 진술 텍스트/hints에
+    두 번(탐지된 객체 + 사기 증거) 들어가 그만큼 가중치가 실질적으로 두 배가 된다."""
+    objects = payload.get("objects") or []
+    scam_evidence = set(payload.get("scam_evidence") or [])
+    return [o for o in objects if o not in scam_evidence]
+
+
 def build_statement_text(payload: dict) -> str:
     """Cybercop 결과 dict에서 risk_agent 모델 입력용 진술 텍스트를 구성한다.
 
@@ -90,9 +100,9 @@ def build_statement_text(payload: dict) -> str:
     if classify_summary:
         parts.append(str(classify_summary).strip())
 
-    objects = payload.get("objects") or []
-    if objects:
-        parts.append("탐지된 객체 " + ", ".join(str(o) for o in objects))
+    general_objects = _general_objects(payload)
+    if general_objects:
+        parts.append("탐지된 객체 " + ", ".join(general_objects))
 
     scam_evidence = payload.get("scam_evidence") or []
     if scam_evidence:
@@ -166,7 +176,7 @@ def assess_risk(
     hints: list[str] = []
     if payload.get("classify_summary"):
         hints.append(str(payload["classify_summary"]))
-    hints.extend(str(o) for o in (payload.get("objects") or []))
+    hints.extend(_general_objects(payload))
     hints.extend(str(e) for e in (payload.get("scam_evidence") or []))
     if payload.get("ocr_after"):
         hints.append(str(payload["ocr_after"]))
