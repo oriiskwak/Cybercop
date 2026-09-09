@@ -26,8 +26,6 @@ This repository provides a **VLM(Gemma 4) 기반 GPU 추론 파이프라인**으
 - 서로 독립된 위험도 모델 2종(`text_risk`, `guideline` S1~S6) + 규칙 기반 사기유형 분류
 - 정상 판정 시 이후 단계(OCR·객체·위험도)를 생략해 비용 절감
 
-**자동 판정 결과는 수사·법률 판단을 대체하지 않습니다.**
-
 ---
 
 ## 📁 Repository structure
@@ -52,8 +50,6 @@ aop_cybercop/
     └─ app/                         # FastAPI 서버 (v0.3 기준, v0.4 미반영)
 ```
 
-**`legacy/`의 코드는 재현·비교용으로만 보관합니다. 신규 실행에는 v0.4만 사용하십시오.**
-해당 파일들은 저장소 루트 기준 상대 경로로 작성되어 있어, 그대로 실행하려면 경로 조정이 필요합니다.
 
 ## ⚙️ Installation
 
@@ -67,12 +63,11 @@ python -m pip install -r requirements.txt
 python download_models.py
 ```
 
-**PyTorch(CUDA 12.6)는 requirements.txt에 포함되어 있으므로 별도 index 옵션은 필요 없습니다.**
 
 VLM(Gemma 4), BGE-m3, RapidOCR 모델은 **첫 실행 때 자동으로 내려받습니다.** 완전히 캐시된 뒤에만
 `HF_HUB_OFFLINE=1`을 사용하십시오.
 
-### 위험도 모델 체크포인트
+### risk model checkpoint
 
 `agents/` 아래의 코드·토크나이저는 저장소에 포함되어 있으나, 체크포인트 두 개는 각각 400MB를 넘어
 GitHub 파일 크기 제한(100MB)을 초과하므로 **GitHub Releases**로 배포합니다. `download_models.py`가
@@ -88,7 +83,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 
 ---
 
-## 🧩 구성 요소
+## 🧩 Components
 
 | 역할 | 사용 모델/엔진 | 위치 |
 |---|---|---|
@@ -98,7 +93,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 | 위험도 (text_risk / guideline S1~S6) | KoSimCSE-RoBERTa 기반 분류기 2종 | `agents/` + `download_models.py` |
 | 사기유형·수법 분류 | 키워드/규칙 기반 매칭 | `agents/risk_agent/risk_api.py` |
 
-## 🔄 처리 흐름
+## 🔄 Workflow
 
 1. 영상은 장면 전환 기반으로 대표 프레임 최대 4장 선택. 이미지는 1장, 이미지 시퀀스는 전 구간에서 고르게 4장.
 2. VLM이 관찰 내용과 체크리스트 판정을 분리해 **사기 / 정상**을 출력 (파싱 실패 시 불명확).
@@ -110,7 +105,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 5. 최종 판정이 **정상이면 이후 단계를 생략**한다 (비용 절감, `skipped: true`).
 6. **사기 또는 검토필요**이면 OCR → 일반객체 확인 → 위험도·사기유형 분류를 수행한다.
 
-## 💻 시스템 요구사항
+## 💻 Requirements
 
 - Python 3.11 또는 3.12 / Linux 권장
 - CUDA 12.6 지원 NVIDIA 드라이버 및 GPU (requirements.txt는 PyTorch 2.12.0 + cu126 기준)
@@ -118,7 +113,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 - 여유 디스크 80GB 이상 (VLM 약 50GB + 임베딩 약 4GB + 위험도 체크포인트 약 0.9GB)
 - URL 입력 시 ffmpeg 필요
 
-## 🔧 환경변수
+## 🔧 Settings
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
@@ -133,7 +128,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 
 ---
 
-## ▶️ 실행
+## ▶️ Run
 
 입력 옵션 다섯 개 중 정확히 하나가 필요합니다.
 
@@ -157,7 +152,7 @@ python cybercop_pipeline_AdotX_v0_4.py --url "https://www.youtube.com/shorts/VID
 python cybercop_pipeline_AdotX_v0_4.py --csv data/labels.csv
 ```
 
-**주요 옵션**
+**Option**
 
 | 옵션 | 기본값 | 설명 |
 |---|---:|---|
@@ -177,7 +172,7 @@ python cybercop_pipeline_AdotX_v0_4.py --csv data/labels.csv
 
 결과는 `<out_dir>/results/ocr_results_<ID>.json`에 저장됩니다. 처리 실패가 한 건이라도 있으면 종료 코드 1을 반환합니다.
 
-## 📊 결과 형식
+## 📊 Result format
 
 ```json
 {
@@ -216,11 +211,5 @@ python cybercop_pipeline_AdotX_v0_4.py --csv data/labels.csv
   이 값을 알 수 없어 기본 0으로 둡니다. 따라서 등급이 보수적으로(낮게) 나오는 경향이 있으며,
   현재 구성에서는 `text_risk`가 더 신뢰 가능한 지표입니다.
 
----
-
-## 📄 라이선스
-
-프로젝트 코드는 LICENSE를 따릅니다. Gemma 4, BGE-m3 등 외부 모델은 각 배포 페이지의 라이선스를
-별도로 확인하십시오.
 
 <p align="center"><sub>최종 업데이트: 2026-09-09 (v0.4)</sub></p>
