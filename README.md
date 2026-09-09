@@ -325,9 +325,5 @@ LOAD_MODELS_ON_STARTUP=0 uvicorn app.main_v0_3:app --host 127.0.0.1 --port 8000
 - **risk_agent의 사기유형 분류는 규칙(키워드/별칭) 기반이며 커버리지가 제한적입니다.** 현재 사기유형×수법 조합 9개만 규칙이 등록되어 있고(risk_agent_package의 통제 어휘는 15종×25종), 해당하지 않는 유형은 "미분류"로 나올 수 있습니다.
 - risk_assessment의 victim_count/total_loss_won은 Cybercop 출력만으로는 알 수 없어 기본값 0(정보없음)이며, ocr_after에서 금액을 best-effort로 추출하는 것 외에는 --victim_count/--total_loss_won 수동 입력에 의존합니다.
 
-## 라이선스
 
-프로젝트 코드는 LICENSE를 따릅니다. Gemma 4와 BGE-m3 등 모델은 각 모델 배포 페이지의 라이선스를 별도로 확인하십시오.
-
----
 최종 업데이트: 2026-09-08 (v0.4)
