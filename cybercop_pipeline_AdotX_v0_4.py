@@ -690,9 +690,9 @@ def _analyze_and_save(video_id, source, label, title, duration,
             "id":             video_id,
             "url":            source,
             "title":          title,
-            "label":          label,           # GT (CSV/--dir 등에서 받은 것)
-            "cls_label":      cls_label,        # 체크리스트 판단
-            "final_label":    final_label,     # 최종 판단 (VLM 증거 에스컬레이션 포함)
+            "label":          label,          
+            "cls_label":      cls_label,      
+            "final_label":    final_label,     
             "classify_summary": cls_summary,
             "grounding":      evidence,
             "objects":        [],

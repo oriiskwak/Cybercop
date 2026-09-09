@@ -49,3 +49,10 @@ __pycache__/
 
 # 환경 설정
 .env
+
+# 위험도 모델 체크포인트 (400MB+, GitHub 파일 크기 제한 초과)
+# → GitHub Releases에서 배포. `python download_models.py` 로 받는다.
+agents/*/checkpoints/*.pt
+
+# 로컬 테스트 입력 폴더 (data/img/kakao1과 중복 + 스크래핑 영상)
+data/video/

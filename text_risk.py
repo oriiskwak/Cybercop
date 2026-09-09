@@ -1,19 +1,23 @@
 """
-text_risk.py — Cybercop 분석 결과를 risk_agent_package의 위험도/사기유형 분류 모델에 연결.
+text_risk.py — Cybercop 분석 결과를 risk_agent 위험도/사기유형 분류 모델에 연결.
 
-risk_agent_package(20260831)는 원래 "진정서 metadata"를 입력받아 텍스트 기반 위험도(하/중/상,
-S1~S6 가이드라인 점수)와 사기유형을 계산하는 별도 패키지다. Cybercop은 이미 완성된 이 파이프라인을
-그대로 재사용한다 — 자체 RAG(범죄유형 매칭)를 다시 만들지 않고, Cybercop 결과(classify_summary,
-objects, scam_evidence, ocr_after 등)에서 "진술 텍스트"를 재구성해 risk_agent의 모델에 넘긴다.
+risk_agent는 원래 "진정서 metadata"를 입력받아 텍스트 기반 위험도(하/중/상, S1~S6 가이드라인 점수)와
+사기유형을 계산하도록 만들어진 코드다. Cybercop은 이미 완성된 이 파이프라인을 그대로 재사용한다 —
+자체 RAG(범죄유형 매칭)를 다시 만들지 않고, Cybercop 결과(classify_summary, objects, scam_evidence,
+ocr_after)에서 "진술 텍스트"를 재구성해 risk_agent의 모델에 넘긴다.
+
+코드는 저장소의 `agents/` 아래에 포함되어 있고, 체크포인트(.pt) 두 개만 크기 제한 때문에 저장소
+바깥에 있다 — `python download_models.py`로 받으면 된다. 체크포인트가 없어도 사기유형 분류(키워드
+기반, 모델 불필요)는 동작하고 위험도만 available: false 로 반환된다.
 
 risk_agent 쪽 예측 함수(predict_text_risk, predict_guideline_multitask_risk,
 classify_crime_from_metagraph)는 전부 내부에서 CUDA_VISIBLE_DEVICES=""를 강제하는 CPU 전용 함수라
 GPU 점유 여부와 무관하게 동작한다. 모델은 각 함수 내부에서 lazy singleton으로 캐싱되므로, 배치
 처리 중에는 최초 1건에서만 로드된다.
 
-의존성: risk_api.py를 import하려면 fastapi/uvicorn/python-multipart/pydantic(Cybercop-main venv에
-이미 있음) 외에 sse-starlette가 필요하다 (`pip install sse-starlette`). risk_api.py는 import만 하고
-uvicorn.run()은 실행하지 않는다(그 호출은 `if __name__ == "__main__":` 가드 안에 있음).
+의존성: risk_api.py를 import하려면 fastapi/uvicorn/python-multipart/pydantic 외에 sse-starlette가
+필요하다(requirements.txt에 포함됨). risk_api.py는 import만 하고 uvicorn.run()은 실행하지 않는다
+(그 호출은 `if __name__ == "__main__":` 가드 안에 있음).
 """
 from __future__ import annotations
 
@@ -24,7 +28,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-RISK_AGENT_DIR = Path(os.getenv("RISK_AGENT_DIR", str(Path.home() / "risk_agent_package(20260831)")))
+BASE_DIR = Path(__file__).resolve().parent
+
+# 기본값은 저장소 자신 — `agents/` 가 여기 포함되어 있다. 외부 risk_agent_package를 쓰고 싶으면
+# RISK_AGENT_DIR 환경변수로 그 경로를 지정하면 된다(해당 경로 아래 agents/ 를 찾는다).
+RISK_AGENT_DIR = Path(os.getenv("RISK_AGENT_DIR", str(BASE_DIR)))
 
 # ──────────────────────────────────────────────
 # risk_agent 함수 지연 로딩 (모델 로드는 최초 assess_risk() 호출 시점에만)
