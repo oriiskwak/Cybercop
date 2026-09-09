@@ -103,6 +103,7 @@ v0.4의 핵심은 **자체 RAG(범죄유형 매칭)를 제거하고, 그 역할�
 - **`RISK_CRIME_RULES`와 통제어휘의 매핑 불일치.** 사이버투자사기가 `RISK_CRIME_RULES`에서는
   "사이버금융범죄", `provo_metadata.CRIME_METHOD_TO_TYPE`에서는 "사이버 사기"로 등록되어 있음.
 - **`--out_dir` 기본값이 `./output_AdotX_v0.3`으로 남아 있음.** v0.4에서도 그대로 쓰이나 이름이 레거시.
-- **API 서버(`app/main_v0_3.py`)와 Dockerfile은 v0.4 미반영.** 현재 CLI만 `risk_assessment`를 포함함.
+- **API 서버는 v0.4 미반영.** 현재 CLI만 `risk_assessment`를 포함하며, v0.3 기준 FastAPI 서버는
+  `legacy/app/`으로 옮겨 보관 중임. Dockerfile과 install.bat은 v0.3 기준이라 v0.4에서 삭제함.
 - **OCR 인식 정확도.** RapidOCR의 한국어 인식 모델은 mobile 버전만 존재하고(server 버전은 중국어만 제공)
   검출 모델만 server로 교체 가능. 프레임 반복으로 인한 유사 텍스트 중복도 남아 있음.

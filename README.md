@@ -182,12 +182,15 @@ python cybercop_pipeline_AdotX_v0_4.py --csv data/labels.csv
 ├── rag/allowed_objects.json         # 일반 객체 427종 (v0.4에서도 사용)
 ├── data/                            # 예제 입력과 CSV
 ├── requirements.txt
-├── app/                             # FastAPI 서버 (v0.3 기준, v0.4 미반영)
-└── cybercop_pipeline_AdotX_v0_1~3.py, CHANGELOG*.md   # 이전 버전 및 변경 이력
+├── docs/                            # 버전별 변경 이력 (CHANGELOG*.md)
+└── legacy/                          # 이전 버전 — 재현·비교용, 실행 대상 아님
+    ├── cybercop_pipeline_AdotX.py, _v0_1.py, _v0_2.py, _v0_3.py
+    └── app/                         # FastAPI 서버 (v0.3 기준, v0.4 미반영)
 ~~~
 
-v0.1~v0.3 코드와 changelog는 재현·비교용입니다. 신규 실행에는 v0.4만 사용하십시오.
-`app/`의 FastAPI 서버와 `Dockerfile`은 v0.3 기준이며 v0.4의 `risk_assessment`를 포함하지 않습니다.
+`legacy/`의 코드는 재현·비교용으로만 보관합니다. 신규 실행에는 v0.4만 사용하십시오.
+이 파일들은 저장소 루트를 기준으로 상대 경로를 잡도록 작성되어 있어, 그대로 실행하려면 경로 조정이
+필요합니다.
 
 ## 라이선스
 
