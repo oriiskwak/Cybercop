@@ -88,8 +88,8 @@ agents/text_risk_model/checkpoints/rule14b1_final_risk_level_text_classifier_bes
 agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt               (425MB)
 ```
 
-체크포인트 없어도 파이프라인 동작함. 사기유형 분류는 키워드 기반이라 모델 불필요.
-위험도(`text_risk`/`guideline_risk`)만 `available: false` 반환.
+체크포인트가 없으면 위험도(`text_risk`/`guideline_risk`, 하/중/상)가 `available: false`로 비어서 나옴.
+사기/정상 판정·객체·OCR·사기유형 분류는 그대로 동작하므로, 위험도가 비어 있으면 체크포인트 설치 여부부터 확인.
 
 ---
 
