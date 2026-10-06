@@ -243,7 +243,6 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 
 | 메서드 | 경로 | 입력 | 설명 |
 |---|---|---|---|
-| GET | `/health/live`, `/health/ready` | — | 프로세스 생존 / 모델 준비 여부 (준비 전 503) |
 | GET | `/api/info` | — | 모델·어휘 크기·기본값 |
 | POST | `/api/video` | form `url` | YouTube/TikTok HTTPS URL |
 | POST | `/api/video/upload` | multipart `file` | 영상 또는 이미지 1개 |
