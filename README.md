@@ -12,7 +12,7 @@
 
 ---
 
-VLM(Gemma 4) 기반 GPU 추론 파이프라인. 영상·이미지·이미지 시퀀스에서 사기/정상 여부를 판별하고,
+VLM(Gemma 4) 기반 GPU 추론 파이프라인. 영상·이미지에서 사기/정상 여부를 판별하고,
 별도 구축된 risk_agent 모델로 위험도·사기유형까지 판정. 결과는 하나의 JSON으로 통합.
 
 운영 기준 코드: `cybercop_pipeline_AdotX_v0_4.py` (CLI), `app/main_v0_4.py` (API 서버)
@@ -105,7 +105,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 
 ## 🔄 Workflow
 
-1. 대표 프레임 선택 — 영상: 장면 전환 기반 최대 4장 / 이미지: 1장 / 이미지 시퀀스: 전 구간 고르게 4장
+1. 대표 프레임 선택 — 영상: 장면 전환 기반 최대 4장 / 이미지: 1장
 2. VLM이 관찰 내용·체크리스트 판정 분리 → 사기/정상 출력 (파싱 실패 시 불명확)
 3. VLM이 영상 전체에서 고르게 뽑은 최대 15장에서 36개 사기증거 어휘 확인 → `evidence_score` 산출
 4. 검토필요 전환 조건
@@ -139,7 +139,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 
 ## ▶️ Run
 
-입력 옵션 5개 중 정확히 1개 필요.
+입력 옵션 중 정확히 1개 필요.
 
 ```bash
 # 이미지 한 장
@@ -150,9 +150,6 @@ python cybercop_pipeline_AdotX_v0_4.py --file /path/to/video.mp4
 
 # 폴더 안 파일 각각 독립 분석
 python cybercop_pipeline_AdotX_v0_4.py --dir /path/to/media
-
-# 이어지는 스크린샷을 한 건으로 분석
-python cybercop_pipeline_AdotX_v0_4.py --seq_dir data/img/kakao1
 
 # 단일 URL
 python cybercop_pipeline_AdotX_v0_4.py --url "https://www.youtube.com/shorts/VIDEO_ID"
@@ -246,8 +243,6 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 | POST | `/api/video` | form `url` | YouTube/TikTok HTTPS URL |
 | POST | `/api/video/upload` | multipart `file` | 영상 또는 이미지 1개 |
 | POST | `/api/video/csv` | multipart `file` (`label`, `link`/`url` 컬럼) | URL 여러 건 |
-
-이미지 시퀀스(이어진 스크린샷 여러 장) 분석은 API에서 제외. CLI `--seq_dir`로만 실행.
 
 요청 인자 `sample_sec`(OCR 간격, 초)·`max_frames`(OCR 최대 장수)는 **OCR에만** 적용.
 - **OCR은 추출한 프레임 수만큼 실행**: OCR 프레임 수 = 영상 길이 ÷ `sample_sec` (최대 `max_frames`장, 넘으면 영상 앞부분부터).
