@@ -61,7 +61,7 @@ from pipeline.vocab import SCAM_EVIDENCE_VOCAB  # {한국어: 영어} — v0.3�
 # 설정
 # ──────────────────────────────────────────────
 BASE_DIR             = Path(__file__).resolve().parent
-MODEL_ID             = os.getenv("VLM_MODEL", "google/gemma-4-26B-A4B-it")
+MODEL_ID             = os.getenv("VLM_MODEL", "Intel/gemma-4-26B-A4B-it-int4-AutoRound")
 DEVICE              = "cuda" if torch.cuda.is_available() else "cpu"
 TORCH_DTYPE         = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 DEFAULT_EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
@@ -145,13 +145,17 @@ def load_ocr() -> RapidOCR:
     """PaddleOCR -> RapidOCR"""
 
     return RapidOCR(params={
+        "Global.use_cls": False,
+
         "EngineConfig.onnxruntime.intra_op_num_threads": 4,
         "EngineConfig.onnxruntime.inter_op_num_threads": 1,
         "EngineConfig.onnxruntime.use_cuda": False,
+
         "Det.engine_type": EngineType.ONNXRUNTIME,
-        "Det.lang_type": LangDet.CH,          # det는 언어 무관, ch 단일 모델
-        "Det.model_type": ModelType.MOBILE,
-        "Det.ocr_version": OCRVersion.PPOCRV5,
+        "Det.lang_type": LangDet.CH,
+        "Det.model_type": ModelType.MEDIUM,
+        "Det.ocr_version": OCRVersion.PPOCRV6,
+
         "Rec.engine_type": EngineType.ONNXRUNTIME,
         "Rec.lang_type": LangRec.KOREAN,
         "Rec.model_type": ModelType.MOBILE,
