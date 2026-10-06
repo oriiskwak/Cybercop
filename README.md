@@ -115,10 +115,7 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 5. 정상 확정 → 이후 단계 생략 (`skipped: true`, 비용 절감)
 6. 사기/검토필요 → OCR → 일반객체 확인 → 이모티콘·아이콘 확인(3단계와 같은 프레임) → 위험도·사기유형 분류 수행
 
-### 프레임 추출 (`pipeline/frame_sampler.py`)
 
-- `sample_spread` 추가: 2초 간격 후보 중 **영상 전체에 고르게** 최대 15장 선택 (30초 이하 영상은 후보 전부).
-  사기증거·이모티콘·아이콘 탐지에 사용.
 
 ## 💻 Requirements
 
