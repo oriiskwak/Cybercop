@@ -80,7 +80,7 @@ VLM(Gemma 4), BGE-m3, RapidOCR는 첫 실행 시 자동 다운로드. 캐시 완
 
 ### risk model checkpoint
 
-체크포인트 2개는 각 400MB↑로 GitHub 파일 크기 제한(100MB) 초과 → GitHub Releases로 배포.
+체크포인트 2개는 **필수**. 각 400MB↑로 GitHub 파일 크기 제한(100MB) 초과 → GitHub Releases로 배포.
 `download_models.py`가 아래 위치에 다운로드.
 
 ```text
@@ -114,8 +114,6 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
    - 사기 + `evidence_score < 0.15`
 5. 정상 확정 → 이후 단계 생략 (`skipped: true`, 비용 절감)
 6. 사기/검토필요 → OCR → 일반객체 확인 → 이모티콘·아이콘 확인(3단계와 같은 프레임) → 위험도·사기유형 분류 수행
-
-
 
 ## 💻 Requirements
 
@@ -236,8 +234,6 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `CYBERCOP_API_KEY` | 미설정 | 설정하면 `/health/*`를 뺀 모든 요청에 `X-API-Key` 헤더 필요 |
-| `CYBERCOP_WORK_DIR` | /tmp/cybercop | 업로드·다운로드 임시 폴더 (요청이 끝나면 삭제) |
 | `MAX_CONCURRENT_ANALYSES` | 1 | 동시에 처리할 분석 수 (GPU 1장 기준 1) |
 | `MAX_UPLOAD_BYTES` | 250MB | 업로드 파일 크기 제한 |
 | `MAX_SEQUENCE_IMAGES` | 50 | 이미지 시퀀스 최대 장수 |
@@ -254,8 +250,11 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 | POST | `/api/video/upload/sequence` | multipart `files`(여러 장) 또는 `archive`(zip), `sequence_id` | 이어진 스크린샷을 한 건으로 |
 | POST | `/api/video/csv` | multipart `file` (`label`, `link`/`url` 컬럼) | URL 여러 건 |
 
-요청 인자 `sample_sec`(OCR 간격, 초)·`max_frames`(OCR 최대 장수)는 **OCR에만** 적용. 판정에 쓰는 프레임
-(대표 4장, 사기증거 15장)은 고정이라 이 값으로 판정이 바뀌지 않음.
+요청 인자 `sample_sec`(OCR 간격, 초)·`max_frames`(OCR 최대 장수)는 **OCR에만** 적용.
+- **OCR은 추출한 프레임 수만큼 실행**: OCR 프레임 수 = 영상 길이 ÷ `sample_sec` (최대 `max_frames`장, 넘으면 영상 앞부분부터).
+  예) 30초 영상에서 `sample_sec=2` → 15장, `sample_sec=1` → 30장
+- **판정·증거 탐지 프레임은 연산 효율을 위해 고정**: 분류 대표 4장, 사기증거·이모티콘·아이콘 최대 15장(영상 전체에서 고르게).
+  영상 길이나 요청 인자와 관계없이 판정 단계 연산량이 일정하고, 이 값으로 판정이 바뀌지 않음.
 
 응답 형식은 `{"message": "success", "request_id": ..., "result": {...}}`. `result`는 CLI 결과 JSON과 아래 항목만 다름.
 
