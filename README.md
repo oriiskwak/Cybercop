@@ -30,7 +30,7 @@ VLM(Gemma 4) 기반 GPU 추론 파이프라인. 영상·이미지·이미지 시
 ## 📁 Repository structure
 
 ```text
-aop_cybercop/
+Cybercop/
 ├─ cybercop_pipeline_AdotX_v0_4.py  # 현재 CLI/핵심 파이프라인
 ├─ text_risk.py                     # 위험도·사기유형 분류 연결
 ├─ download_models.py               # 위험도 체크포인트 다운로드
@@ -43,6 +43,7 @@ aop_cybercop/
 ├─ rag/allowed_objects.json         # 일반 객체 427종 (v0.4에서도 사용)
 ├─ data/                            # 예제 입력과 CSV
 ├─ requirements.txt
+├─ install_requirements.py          # 의존성 라이브러리 설치 프로그램
 ├─ docs/                            # 버전별 변경 이력 (CHANGELOG*.md)
 └─ legacy/                          # 이전 버전 — 재현·비교용, 실행 대상 아님
     ├─ cybercop_pipeline_AdotX.py, _v0_1.py, _v0_2.py, _v0_3.py
@@ -55,7 +56,9 @@ aop_cybercop/
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+
+# 의존성 라이브러리 다운로드
+python install_requirements.py
 
 # 위험도 모델 체크포인트 다운로드 (약 848MB)
 python download_models.py
@@ -82,9 +85,9 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 
 | 역할 | 모델/엔진 | 위치 |
 |---|---|---|
-| VLM (분류·증거·객체 확인) | [google/gemma-4-26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it), 26B(A4B MoE) BF16 | HF 자동 다운로드 |
+| VLM (분류·증거·객체 확인) | [Intel/gemma-4-26B-A4B-it-int4-AutoRound](https://huggingface.co/Intel/gemma-4-26B-A4B-it-int4-AutoRound), 26B(A4B MoE) INT4 auto-round 양자화 | HF 자동 다운로드 |
 | 임베딩 (일반객체 후보 검색) | [BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) | HF 자동 다운로드 |
-| OCR | RapidOCR 3.9.2, PP-OCRv5 Korean, ONNX Runtime CPU | 첫 실행 시 자동 다운로드 |
+| OCR | RapidOCR 3.9.2, PP-OCRv6 Detection, PP-OCR-v5 Korean Recognition, ONNX Runtime CPU | 첫 실행 시 자동 다운로드 |
 | 위험도 (text_risk / guideline S1~S6) | KoSimCSE-RoBERTa 기반 분류기 2종 | `agents/` + `download_models.py` |
 | 사기유형·수법 분류 | 키워드/규칙 기반 매칭 | `agents/risk_agent/risk_api.py` |
 
@@ -104,8 +107,8 @@ agents/guideline_multitask_model/checkpoints/guideline_multitask_best.pt        
 
 - Python 3.11 또는 3.12 / Linux 권장
 - CUDA 12.6 지원 NVIDIA 드라이버·GPU (requirements.txt: PyTorch 2.12.0 + cu126 기준)
-- VRAM 합계 64GB↑ 권장 (`device_map="auto"`로 다중 GPU 분산)
-- 여유 디스크 80GB↑ 권장 (VLM 약 50GB + 임베딩 약 4GB + 위험도 체크포인트 약 0.9GB)
+- VRAM 합계 20GB↑ 권장 (`device_map="auto"`로 다중 GPU 분산 지원)
+- 여유 디스크 30GB↑ 권장 (VLM 약 50GB + 임베딩 약 4GB + 위험도 체크포인트 약 0.9GB)
 - URL 입력 시 ffmpeg 필요
 
 ## 🔧 Settings
@@ -152,7 +155,7 @@ python cybercop_pipeline_AdotX_v0_4.py --csv data/labels.csv
 | 옵션 | 기본값 | 설명 |
 |---|---:|---|
 | `--out_dir` | ./output_AdotX_v0.3 | 결과·다운로드 저장 경로 (이름 레거시, v0.4도 동일 사용) |
-| `--model` | google/gemma-4-26B-A4B-it | VLM ID 또는 로컬 경로 |
+| `--model` | Intel/gemma-4-26B-A4B-it-int4-AutoRound | VLM ID 또는 로컬 경로 |
 | `--scan_sec` | 0.5 | 대표 프레임 탐색 간격 |
 | `--max_vlm_frames` | 4 | 분류 대표 프레임 최대 수 |
 | `--evidence_sec` | 3.0 | 증거 탐지 샘플링 간격 |
@@ -204,4 +207,4 @@ python cybercop_pipeline_AdotX_v0_4.py --csv data/labels.csv
 - `text_risk`·`guideline_risk`는 서로 독립된 두 모델 결과. 합쳐진 단일 등급 없음
 - `guideline_risk`는 S1(피해금액)·S2(피해자 수)가 전체 가중치의 60% 차지. 영상 단독 분석으로는 값을 알 수 없어 기본 0 처리 → 등급이 보수적(낮게)으로 나오는 경향. 현재 구성에서는 `text_risk`가 더 신뢰 가능한 지표.
 
-<p align="center"><sub>최종 업데이트: 2026-09-09 (v0.4)</sub></p>
+<p align="center"><sub>최종 업데이트: 2026-10-06 (v0.4)</sub></p>
