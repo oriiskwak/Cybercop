@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # GitHub Releases 태그. 새 버전을 올리면 이 값만 바꾸면 된다.
 RELEASE_TAG = "models-v0.4"
-RELEASE_BASE = f"https://github.com/oriiskwak/Cybercop/releases/download/{RELEASE_TAG}"
+RELEASE_BASE = f"https://github.com/oriiskwak/cybercop/releases/download/{RELEASE_TAG}"
 
 MODELS = [
     {
