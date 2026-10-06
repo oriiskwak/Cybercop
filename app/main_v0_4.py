@@ -3,7 +3,7 @@
 v0.3 API(legacy/app/main_v0_3.py) 대비 변경점:
   - 파이프라인을 cybercop_pipeline_AdotX_v0_4로 교체. 자체 RAG(`rag` 필드, `top_k` 인자)가 사라지고
     risk_agent 위험도·사기유형(`risk_assessment`)이 들어감.
-  - OCR 프레임 인자(`sample_sec`, `max_frames`)를 받음. 위험도의 피해자 수·피해금액은 받지 않고
+  - OCR 간격 인자(`sample_sec`)를 받음. OCR 최대 장수는 서버 설정(`OCR_MAX_FRAMES`)으로 고정. 위험도의 피해자 수·피해금액은 받지 않고
     파이프라인 기본값(피해자 0=정보 없음, 금액은 OCR에서 추출 시도)으로 계산함.
   - 응답의 탐지 객체를 3필드(`scam_objects`/`general_objects`/`icon_emoji_objects`)로 나누고,
     OCR은 전체 텍스트(`ocr_after`)만 담음(v0.3의 `ocr`/`ocr_before`/`ocr_candidates`는 응답에서 뺌).
@@ -60,10 +60,10 @@ LOAD_MODELS_ON_STARTUP = _env_bool("LOAD_MODELS_ON_STARTUP", True)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(250 * 1024 * 1024)))
 MAX_CSV_ROWS = int(os.getenv("MAX_CSV_ROWS", "100"))
 MAX_CONCURRENT_ANALYSES = int(os.getenv("MAX_CONCURRENT_ANALYSES", "1"))
-# OCR 프레임 인자 기본값은 CLI(--sample_sec/--max_frames) 기본값과 동일.
+# OCR 간격 기본값과 OCR 최대 장수는 CLI(--sample_sec/--max_frames) 기본값과 동일.
+# OCR 최대 장수는 요청으로 받지 않음 — 작은 값이 오면 영상 앞부분만 OCR되므로 서버 설정으로 고정.
 DEFAULT_SAMPLE_SEC = float(os.getenv("DEFAULT_SAMPLE_SEC", "2.0"))
-DEFAULT_MAX_FRAMES = int(os.getenv("DEFAULT_MAX_FRAMES", "1000"))
-MAX_FRAMES_LIMIT = int(os.getenv("MAX_FRAMES_LIMIT", "1000"))
+OCR_MAX_FRAMES = int(os.getenv("OCR_MAX_FRAMES", "1000"))
 API_KEY = os.getenv("CYBERCOP_API_KEY")
 ALLOWED_URL_HOSTS = {
     host.strip().lower()
@@ -80,12 +80,9 @@ if min(
     MAX_CSV_ROWS,
     MAX_CONCURRENT_ANALYSES,
     DEFAULT_SAMPLE_SEC,
-    DEFAULT_MAX_FRAMES,
-    MAX_FRAMES_LIMIT,
+    OCR_MAX_FRAMES,
 ) <= 0:
     raise RuntimeError("API 크기/동시성/프레임 제한 환경변수는 0보다 커야 합니다.")
-if DEFAULT_MAX_FRAMES > MAX_FRAMES_LIMIT:
-    raise RuntimeError("DEFAULT_MAX_FRAMES는 MAX_FRAMES_LIMIT 이하여야 합니다.")
 
 
 @dataclass
@@ -192,8 +189,7 @@ async def api_info() -> dict:
         "embedding_model": core.DEFAULT_EMBED_MODEL,
         "ocr": "RapidOCR PP-OCRv6 detection(MEDIUM) + PP-OCRv5 Korean recognition, ONNX Runtime CPU",
         "scam_object_vocab_size": len(core.SCAM_EVIDENCE_LABELS),
-        "ocr_defaults": {"sample_sec": DEFAULT_SAMPLE_SEC, "max_frames": DEFAULT_MAX_FRAMES,
-                         "max_frames_limit": MAX_FRAMES_LIMIT},
+        "ocr_defaults": {"sample_sec": DEFAULT_SAMPLE_SEC, "max_frames": OCR_MAX_FRAMES},
         "risk_agent": resources.risk_agent,
         "device": core.DEVICE,
         "ready": resources.ready,
@@ -211,12 +207,12 @@ def _ensure_ready() -> None:
 @dataclass(frozen=True)
 class AnalysisOptions:
     sample_sec: float = DEFAULT_SAMPLE_SEC
-    max_frames: int = DEFAULT_MAX_FRAMES
+    max_frames: int = OCR_MAX_FRAMES
 
 
 def _pipeline_args(out_dir: Path, opts: AnalysisOptions) -> SimpleNamespace:
     # 판정 쪽 프레임(분류용 대표 4장, 사기 객체·이모티콘아이콘용 영상 전체 고르게 15장)은 고정하고,
-    # 요청으로 받는 sample_sec/max_frames는 OCR 프레임에만 사용.
+    # 요청으로 받는 sample_sec는 OCR 프레임에만 사용 (OCR 최대 장수는 서버 설정 OCR_MAX_FRAMES).
     return SimpleNamespace(
         out_dir=str(out_dir),
         scan_sec=0.5,
@@ -410,23 +406,21 @@ def _public_error(request_id: str, exc: Exception) -> HTTPException:
     )
 
 
-def _options(sample_sec: float, max_frames: int) -> AnalysisOptions:
-    return AnalysisOptions(sample_sec=sample_sec, max_frames=max_frames)
+def _options(sample_sec: float) -> AnalysisOptions:
+    return AnalysisOptions(sample_sec=sample_sec)
 
 
 SampleSec = Annotated[float, Form(gt=0, le=60, description="OCR 프레임 추출 간격(초). 영상 길이 ÷ 이 값 = 프레임별 OCR 개수")]
-MaxFrames = Annotated[int, Form(ge=1, le=MAX_FRAMES_LIMIT, description="OCR 최대 프레임 수. 넘으면 영상 앞부분부터 이 수만큼만 OCR")]
 
 
 @app.post("/api/video", dependencies=AUTH)
 async def analyze_url(
     url: Annotated[str, Form(description="YouTube/TikTok HTTPS URL")],
     sample_sec: SampleSec = DEFAULT_SAMPLE_SEC,
-    max_frames: MaxFrames = DEFAULT_MAX_FRAMES,
 ):
     _ensure_ready()
     safe_url = _validate_url(url)
-    opts = _options(sample_sec, max_frames)
+    opts = _options(sample_sec)
     request_id = uuid.uuid4().hex
     try:
         async with analysis_slots:
@@ -443,14 +437,13 @@ async def analyze_url(
 async def analyze_upload(
     file: UploadFile = File(..., description="영상 또는 이미지 파일"),
     sample_sec: SampleSec = DEFAULT_SAMPLE_SEC,
-    max_frames: MaxFrames = DEFAULT_MAX_FRAMES,
 ):
     _ensure_ready()
     original_name = _safe_name(file.filename)
     ext = Path(original_name).suffix.lower()
     if ext not in core.VIDEO_EXTS | core.IMAGE_EXTS:
         raise HTTPException(status_code=400, detail=f"지원하지 않는 파일 형식입니다: {ext}")
-    opts = _options(sample_sec, max_frames)
+    opts = _options(sample_sec)
     request_id = uuid.uuid4().hex
     try:
         with tempfile.TemporaryDirectory(prefix="upload-", dir=WORK_DIR) as temp:
@@ -478,7 +471,6 @@ async def analyze_upload(
 async def analyze_csv(
     file: UploadFile = File(..., description="label/link 또는 label/url 컬럼 CSV"),
     sample_sec: SampleSec = DEFAULT_SAMPLE_SEC,
-    max_frames: MaxFrames = DEFAULT_MAX_FRAMES,
 ):
     _ensure_ready()
     if Path(_safe_name(file.filename)).suffix.lower() != ".csv":
@@ -500,7 +492,7 @@ async def analyze_csv(
     if not ({"link", "url"} & set(rows[0])):
         raise HTTPException(status_code=400, detail="CSV에 link 또는 url 컬럼이 필요합니다.")
 
-    opts = _options(sample_sec, max_frames)
+    opts = _options(sample_sec)
     request_id = uuid.uuid4().hex
 
     def process_rows() -> list[dict]:

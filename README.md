@@ -235,7 +235,8 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 | `MAX_UPLOAD_BYTES` | 250MB | 업로드 파일 크기 제한 |
 | `MAX_CSV_ROWS` | 100 | CSV 일괄 분석 최대 행 수 |
 | `ALLOWED_URL_HOSTS` | youtube.com,youtu.be,tiktok.com | 허용 URL 호스트 |
-| `DEFAULT_SAMPLE_SEC` / `DEFAULT_MAX_FRAMES` / `MAX_FRAMES_LIMIT` | 2.0 / 1000 / 1000 | OCR 프레임 인자 기본값·상한 |
+| `DEFAULT_SAMPLE_SEC` | 2.0 | OCR 간격(초) 기본값 |
+| `OCR_MAX_FRAMES` | 1000 | OCR 최대 장수 (넘으면 영상 앞부분부터) |
 
 | 메서드 | 경로 | 입력 | 설명 |
 |---|---|---|---|
@@ -244,8 +245,8 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 | POST | `/api/video/upload` | multipart `file` | 영상 또는 이미지 1개 |
 | POST | `/api/video/csv` | multipart `file` (`label`, `link`/`url` 컬럼) | URL 여러 건 |
 
-요청 인자 `sample_sec`(OCR 간격, 초)·`max_frames`(OCR 최대 장수)는 **OCR에만** 적용.
-- **OCR은 추출한 프레임 수만큼 실행**: OCR 프레임 수 = 영상 길이 ÷ `sample_sec` (최대 `max_frames`장, 넘으면 영상 앞부분부터).
+요청 인자 `sample_sec`(OCR 간격, 초)는 **OCR에만** 적용. `max_frames`는 받지 않음(보내도 무시).
+- **OCR은 추출한 프레임 수만큼 실행**: OCR 프레임 수 ≈ 영상 길이 ÷ `sample_sec` (최대 `OCR_MAX_FRAMES`장, 기본 1000장. 상한을 넘으면 영상 앞부분부터 분석).
   예) 30초 영상에서 `sample_sec=2` → 15장, `sample_sec=1` → 30장
 - **판정·증거 탐지 프레임은 연산 효율을 위해 고정**: 분류 대표 4장, 사기증거·이모티콘·아이콘 최대 15장(영상 전체에서 고르게).
   영상 길이나 요청 인자와 관계없이 판정 단계 연산량이 일정하고, 이 값으로 판정이 바뀌지 않음.
@@ -256,7 +257,7 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 |---|---|
 | `scam_objects` / `general_objects` / `icon_emoji_objects` | 탐지 객체 3필드 (`scam_objects` = `scam_evidence`, 상위 5개) |
 | `ocr_after` | OCR은 전체 텍스트만 제공. `ocr_frames`·`ocr`·`ocr_before`·`ocr_candidates`는 응답에서 제외 |
-| `ocr_settings` | 이번 요청의 `sample_sec`, `max_frames`, 실제 OCR 프레임 수 `n_frames` |
+| `ocr_settings` | 이번 요청의 `sample_sec`, OCR 최대 장수 `max_frames`, 실제 OCR 프레임 수 `n_frames` |
 | `review_reason` | `final_label`이 검토필요일 때 그 사유 한 문장, 그 외 `null` |
 | `risk_assessment` | 정상 판정이면 `null` |
 | `label` / `input_label` | 판정이 사기·검토필요면 `abnormal`, 정상이면 `normal` / 요청 쪽 라벨 |
