@@ -52,10 +52,11 @@ from rapidocr import RapidOCR, EngineType, LangDet, LangRec, ModelType, OCRVersi
 from text_risk import assess_risk
 
 # 새 파이프라인 모듈
-from pipeline.frame_sampler import sample_uniform, sample_keyframe
+from pipeline.frame_sampler import sample_uniform, sample_keyframe, sample_spread
 from pipeline.vlm_classify import classify_scam
 from pipeline.evidence_aggregator import should_escalate
 from pipeline.vocab import SCAM_EVIDENCE_VOCAB  # {한국어: 영어} — v0.3에서는 한국어 키만 closed-set 목록으로 사용
+from pipeline.vocab import EMOTICON_VOCAB, ICON_VOCAB
 
 # ──────────────────────────────────────────────
 # 설정
@@ -430,15 +431,19 @@ def build_ocr_outputs(detections: list) -> tuple:
     return ocr_spans, ocr_candidates
 
 def _ocr_worker(ocr: RapidOCR, frames: list, out: dict):
-    detections, ocr_before = [], []
+    detections, ocr_before, ocr_frames = [], [], []
     for i, (sec, img) in enumerate(frames):
         lines = _merge_same_line(run_ocr_on_frame(ocr, img))
         ocr_before.append("\n".join(l["text"] for l in lines))
+        # 프레임별 OCR — 글자가 없는 프레임도 빈 text로 남겨 추출한 프레임 수와 개수를 맞춤.
+        ocr_frames.append({"frame_idx": i, "sec": round(float(sec), 2), "time": format_ts(sec),
+                           "text": ocr_before[-1]})
         for line in lines:
             detections.append({"frame_idx": i, "sec": sec,
                                 "text": line["text"], "score": line["score"], "bbox": line["bbox"]})
     out["detections"] = detections
     out["ocr_before"] = ocr_before
+    out["ocr_frames"] = ocr_frames
 
 
 def _vlm_generate(processor, model, image: Image.Image, prompt: str, device: str, max_new_tokens: int) -> str:
@@ -563,12 +568,42 @@ def vlm_object_fallback(vlm_frames, processor, model, obj_mapper, device: str) -
     return list(detected)
 
 
+# ──────────────────────────────────────────────
+# 이모티콘(9종)·아이콘(50종) — closed-set, 2026-10 통합본. 사기/검토필요 판정 뒤에만 실행하는 표시용 탐지라
+# 판정(evidence_score)과 위험도(risk_assessment) 입력에는 미사용. 두 목록을 한 프롬프트에 함께 넣어
+# 프레임당 VLM 호출은 1회.
+# ──────────────────────────────────────────────
+def _icon_emoji_prompt() -> str:
+    return (
+        "다음은 영상/이미지에서 뽑은 프레임이다.\n"
+        "아래 두 목록 중 이 프레임에 실제로 보이는 이모티콘과 아이콘만 골라라.\n"
+        f"[이모티콘 목록]\n{', '.join(EMOTICON_VOCAB)}\n"
+        f"[아이콘 목록]\n{', '.join(ICON_VOCAB)}\n\n"
+        "규칙: 반드시 각 목록에 있는 단어 그대로만 쓴다. 목록에 없는 새 단어는 절대 만들지 않는다. "
+        "확신 없으면 포함하지 않는다. 해당 없으면 \"없음\".\n"
+        "출력 형식 (이 형식만 사용, 설명 없이):\n[EMOJI] 항목1, 항목2\n[ICON] 항목1, 항목2"
+    )
+
+
+def vlm_icon_emoji_batch(frames, processor, model, device: str) -> dict:
+    """프레임별 이모티콘·아이콘 closed-set 탐지 후, 등장 프레임 수가 많은 순으로 정렬해 반환."""
+    prompt = _icon_emoji_prompt()
+    counts = {"emoticons": defaultdict(int), "icons": defaultdict(int)}
+    for _, img in frames:
+        raw = _vlm_generate(processor, model, img, prompt, device, max_new_tokens=150)
+        for key, tag, vocab in (("emoticons", "EMOJI", EMOTICON_VOCAB), ("icons", "ICON", ICON_VOCAB)):
+            for lb in set(_parse_bracket_list(raw, tag, set(vocab))):
+                counts[key][lb] += 1
+    return {key: sorted(c, key=lambda lb: c[lb], reverse=True) for key, c in counts.items()}
+
+
 def run_ocr(ocr_frames, ocr: RapidOCR) -> dict:
     ocr_out = {}
     _ocr_worker(ocr, ocr_frames, ocr_out)
     ocr_spans, ocr_candidates = build_ocr_outputs(ocr_out.get("detections", []))
     return {
         "ocr_before":     ocr_out.get("ocr_before", []),
+        "ocr_frames":     ocr_out.get("ocr_frames", []),
         "ocr_spans":      ocr_spans,
         "ocr_candidates": ocr_candidates,
     }
@@ -602,7 +637,10 @@ def correct_ocr_text_with_vlm(processor, model, raw_text: str, device: str) -> s
 # ──────────────────────────────────────────────
 def download_video(url: str, out_dir: Path) -> tuple:
     outtmpl = str(out_dir / "%(title).80s_%(id)s.%(ext)s")
-    ydl_opts = {"outtmpl": outtmpl, "format": "best[ext=mp4]/best",
+    # 영상+소리 합본이 없고 분리 스트림만 주는 YouTube 영상이 늘어서, 합본이 없으면 영상 스트림만 받음
+    # (프레임만 읽으므로 소리는 불필요, 합치려면 ffmpeg가 필요함). OCR 속도를 위해 높이 720 이하.
+    ydl_opts = {"outtmpl": outtmpl,
+                "format": "best[ext=mp4]/best/bv*[ext=mp4][vcodec^=avc1][height<=720]/bv*[height<=720]/bv*",
                 "noplaylist": True, "quiet": True, "no_warnings": True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -633,10 +671,10 @@ def _get_video_frames(v_path: Path, args) -> tuple:
         raise ValueError(f"유효한 비디오 프레임/FPS가 없습니다: {v_path}")
     duration = frame_count / fps
     vlm_frames = sample_keyframe(v_path, args.scan_sec, args.max_vlm_frames)
-    evidence_frames = sample_uniform(
-        v_path, every_n=args.evidence_sec, max_frames=args.max_evidence_frames
-    )
     ocr_frames = sample_uniform(v_path, args.sample_sec, args.max_frames)
+    # 사기 객체(증거)·이모티콘아이콘 탐지는 영상 전체에 고르게 최대 --max_evidence_frames(15)장.
+    # 예전 방식(3초 간격 앞에서 15장)은 영상 앞 45초만 봐서 그 뒤에 나오는 증거를 놓침.
+    evidence_frames = sample_spread(v_path, args.max_evidence_frames)
     if not vlm_frames or not evidence_frames:
         raise ValueError(f"비디오에서 분석 프레임을 추출하지 못했습니다: {v_path}")
     return duration, vlm_frames, evidence_frames, ocr_frames
@@ -701,7 +739,10 @@ def _analyze_and_save(video_id, source, label, title, duration,
             "grounding":      evidence,
             "objects":        [],
             "scam_evidence":  evidence["top_labels"],
+            "general_objects": [],
+            "icon_emoji_objects": {"emoticons": [], "icons": []},
             "ocr_before":     [],
+            "ocr_frames":     [],
             "ocr":            [],
             "ocr_after":      "",
             "ocr_candidates": [],
@@ -733,7 +774,8 @@ def _analyze_and_save(video_id, source, label, title, duration,
                  "text": correct_ocr_text_with_vlm(processor, model, text, DEVICE)}
                 for i, text in enumerate(ocr_before) if text.strip()
             ]
-            detail = {"ocr_before": ocr_before, "ocr_candidates": []}
+            detail = {"ocr_before": ocr_before, "ocr_frames": ocr_out.get("ocr_frames", []),
+                      "ocr_candidates": []}
         else:
             detail = run_ocr(ocr_frames, ocr)
             corrected_ocr = detail["ocr_spans"] # VLM 기반 후처리 제외
@@ -741,12 +783,17 @@ def _analyze_and_save(video_id, source, label, title, duration,
 
         general_objs = vlm_object_fallback(vlm_frames, processor, model, obj_mapper, DEVICE)
         objects_out = list(dict.fromkeys(evidence["top_labels"] + general_objs))
+        icon_emoji = vlm_icon_emoji_batch(evidence_frames, processor, model, DEVICE)
 
         full_payload = {
             **base_payload,
             "objects":        objects_out,        # 사기증거 top_labels ∪ 일반객체 (기존 스키마 호환)
             "scam_evidence":  evidence["top_labels"],  # 사기증거만 별도 필드 (평가/분석용)
+            # 탐지 객체 3필드 — 사기 객체(scam_evidence, 빈도순 상위 5) / 일반 객체 / 이모티콘·아이콘
+            "general_objects": [o for o in general_objs if o not in evidence["top_labels"]],
+            "icon_emoji_objects": icon_emoji,
             "ocr_before":     detail["ocr_before"],
+            "ocr_frames":     detail["ocr_frames"],
             "ocr":            corrected_ocr,
             "ocr_after":      ocr_all,
             "ocr_candidates": detail["ocr_candidates"],
@@ -906,10 +953,10 @@ def main():
     parser.add_argument("--max_vlm_frames",       type=int,   default=4)
     parser.add_argument("--evidence_sec", "--dino_sec", dest="evidence_sec",
                         type=float, default=3.0,
-                        help="VLM 증거 탐지용 균등 샘플링 간격(초)")
+                        help="(사용 안 함 — 증거 프레임은 영상 전체에 고르게 뽑음. 이전 자동화 호환용)")
     parser.add_argument("--max_evidence_frames", "--max_dino_frames",
                         dest="max_evidence_frames", type=int, default=15,
-                        help="VLM 증거 탐지에 넘길 최대 프레임 수")
+                        help="사기 객체·이모티콘아이콘 탐지 프레임 수 (영상 전체에 고르게)")
     parser.add_argument("--escalate_thr",         type=float, default=ESCALATE_THR)
     parser.add_argument("--victim_count",         type=int,   default=None,
                         help="risk_assessment용 피해자 수 수동 override (미지정 시 0=정보없음)")

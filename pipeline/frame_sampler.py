@@ -1,6 +1,7 @@
 """프레임 샘플링 — v2 로직 재사용."""
 import math
 import cv2
+import numpy as np
 from pathlib import Path
 from PIL import Image
 
@@ -20,6 +21,30 @@ def sample_uniform(video_path: Path, every_n: float = 1.0, max_frames: int = 120
             frames.append((idx / fps, img))
             if len(frames) >= max_frames:
                 break
+        idx += 1
+    cap.release()
+    return frames
+
+
+def sample_spread(video_path: Path, n: int = 15, grid_sec: float = 2.0) -> list:
+    """영상 전체에 고르게 최대 n장. (sec, PIL.Image) 리스트 반환.
+    grid_sec 간격 격자(sample_uniform과 같은 프레임 위치)에서 등간격으로 n개 선택 — 영상이
+    짧아 격자가 n개 이하면 격자 전부. 고를 프레임 번호를 먼저 정하고 그 프레임만 이미지로 변환."""
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    step = max(int(round(fps * grid_sec)), 1)
+    grid = list(range(0, max(total, 1), step))
+    if len(grid) > n:
+        grid = sorted({grid[int(round(i))] for i in np.linspace(0, len(grid) - 1, n)})
+    wanted, frames, idx = set(grid), [], 0
+    while wanted:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx in wanted:
+            frames.append((idx / fps, Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))))
+            wanted.discard(idx)
         idx += 1
     cap.release()
     return frames
