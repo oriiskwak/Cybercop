@@ -236,7 +236,6 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 |---|---|---|
 | `MAX_CONCURRENT_ANALYSES` | 1 | 동시에 처리할 분석 수 (GPU 1장 기준 1) |
 | `MAX_UPLOAD_BYTES` | 250MB | 업로드 파일 크기 제한 |
-| `MAX_SEQUENCE_IMAGES` | 50 | 이미지 시퀀스 최대 장수 |
 | `MAX_CSV_ROWS` | 100 | CSV 일괄 분석 최대 행 수 |
 | `ALLOWED_URL_HOSTS` | youtube.com,youtu.be,tiktok.com | 허용 URL 호스트 |
 | `DEFAULT_SAMPLE_SEC` / `DEFAULT_MAX_FRAMES` / `MAX_FRAMES_LIMIT` | 2.0 / 1000 / 1000 | OCR 프레임 인자 기본값·상한 |
@@ -246,8 +245,9 @@ uvicorn app.main_v0_4:app --host 0.0.0.0 --port 8000 --workers 1
 | GET | `/api/info` | — | 모델·어휘 크기·기본값 |
 | POST | `/api/video` | form `url` | YouTube/TikTok HTTPS URL |
 | POST | `/api/video/upload` | multipart `file` | 영상 또는 이미지 1개 |
-| POST | `/api/video/upload/sequence` | multipart `files`(여러 장) 또는 `archive`(zip), `sequence_id` | 이어진 스크린샷을 한 건으로 |
 | POST | `/api/video/csv` | multipart `file` (`label`, `link`/`url` 컬럼) | URL 여러 건 |
+
+이미지 시퀀스(이어진 스크린샷 여러 장) 분석은 API에서 제외. CLI `--seq_dir`로만 실행.
 
 요청 인자 `sample_sec`(OCR 간격, 초)·`max_frames`(OCR 최대 장수)는 **OCR에만** 적용.
 - **OCR은 추출한 프레임 수만큼 실행**: OCR 프레임 수 = 영상 길이 ÷ `sample_sec` (최대 `max_frames`장, 넘으면 영상 앞부분부터).

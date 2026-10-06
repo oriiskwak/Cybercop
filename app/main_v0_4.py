@@ -23,7 +23,6 @@ import secrets
 import tempfile
 import time
 import uuid
-import zipfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
@@ -59,9 +58,6 @@ def _env_bool(name: str, default: bool) -> bool:
 WORK_DIR = Path(os.getenv("CYBERCOP_WORK_DIR", "/tmp/cybercop"))
 LOAD_MODELS_ON_STARTUP = _env_bool("LOAD_MODELS_ON_STARTUP", True)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(250 * 1024 * 1024)))
-MAX_ARCHIVE_BYTES = int(os.getenv("MAX_ARCHIVE_BYTES", str(100 * 1024 * 1024)))
-MAX_SEQUENCE_BYTES = int(os.getenv("MAX_SEQUENCE_BYTES", str(200 * 1024 * 1024)))
-MAX_SEQUENCE_IMAGES = int(os.getenv("MAX_SEQUENCE_IMAGES", "50"))
 MAX_CSV_ROWS = int(os.getenv("MAX_CSV_ROWS", "100"))
 MAX_CONCURRENT_ANALYSES = int(os.getenv("MAX_CONCURRENT_ANALYSES", "1"))
 # OCR 프레임 인자 기본값은 CLI(--sample_sec/--max_frames) 기본값과 동일.
@@ -81,9 +77,6 @@ Image.MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "50000000"))
 
 if min(
     MAX_UPLOAD_BYTES,
-    MAX_ARCHIVE_BYTES,
-    MAX_SEQUENCE_BYTES,
-    MAX_SEQUENCE_IMAGES,
     MAX_CSV_ROWS,
     MAX_CONCURRENT_ANALYSES,
     DEFAULT_SAMPLE_SEC,
@@ -344,24 +337,6 @@ def _run_url(url: str, opts: AnalysisOptions, out_dir: Path) -> dict:
     return _normalize_result(_read_result(out_dir), opts, source=url)
 
 
-def _run_sequence(seq_dir: Path, opts: AnalysisOptions, out_dir: Path) -> dict:
-    prediction = core.process_image_sequence(
-        seq_dir,
-        "manual",
-        resources.processor,
-        resources.model,
-        resources.ocr,
-        _pipeline_args(out_dir, opts),
-        resources.object_mapper,
-    )
-    if prediction is None:
-        raise RuntimeError("sequence analysis did not produce a result")
-    payload = _normalize_result(_read_result(out_dir), opts, result_id=seq_dir.name, title=seq_dir.name)
-    payload["url"] = None
-    payload["n_images"] = len([p for p in seq_dir.iterdir() if p.suffix.lower() in core.IMAGE_EXTS])
-    return payload
-
-
 def _validate_url(url: str) -> str:
     value = url.strip()
     parsed = urlparse(value)
@@ -393,15 +368,6 @@ def _safe_name(filename: str | None) -> str:
 
 def _safe_stem(value: str) -> str:
     return re.sub(r"[^\w.-]+", "_", value, flags=re.UNICODE).strip("._")[:80]
-
-
-def _safe_sequence_id(value: str | None) -> str:
-    if not value:
-        return f"seq_{uuid.uuid4().hex[:12]}"
-    cleaned = _safe_stem(value)
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="유효한 sequence_id가 필요합니다.")
-    return cleaned
 
 
 async def _read_limited(upload: UploadFile, limit: int) -> bytes:
@@ -505,85 +471,6 @@ async def analyze_upload(
     finally:
         await file.close()
     payload["title"] = original_name
-    return {"message": "success", "request_id": request_id, "result": payload}
-
-
-@app.post("/api/video/upload/sequence", dependencies=AUTH)
-async def analyze_upload_sequence(
-    files: list[UploadFile] | None = File(default=None, description="순서대로 처리할 이미지 파일"),
-    archive: UploadFile | None = File(default=None, description="이미지가 들어 있는 zip 파일"),
-    sequence_id: str | None = Form(default=None),
-):
-    _ensure_ready()
-    if archive is not None and files:
-        raise HTTPException(status_code=400, detail="files와 archive 중 하나만 보내세요.")
-    if archive is None and not files:
-        raise HTTPException(status_code=400, detail="files 또는 archive가 필요합니다.")
-
-    safe_id = _safe_sequence_id(sequence_id)
-    # 이미지 시퀀스는 이미지 1장 = 프레임 1개라 OCR 프레임 인자를 받지 않음.
-    opts = _options(DEFAULT_SAMPLE_SEC, DEFAULT_MAX_FRAMES)
-    request_id = uuid.uuid4().hex
-    opened_uploads = [*(files or []), *([archive] if archive is not None else [])]
-    try:
-        with tempfile.TemporaryDirectory(prefix="sequence-", dir=WORK_DIR) as temp:
-            temp_path = Path(temp)
-            # 폴더 이름이 결과 id·제목이 됨(CLI --seq_dir와 동일).
-            seq_dir = temp_path / safe_id
-            seq_dir.mkdir()
-            items: list[tuple[str, bytes]] = []
-
-            if archive is not None:
-                if Path(_safe_name(archive.filename)).suffix.lower() != ".zip":
-                    raise HTTPException(status_code=400, detail="archive는 zip 파일이어야 합니다.")
-                raw = await _read_limited(archive, MAX_ARCHIVE_BYTES)
-                try:
-                    with zipfile.ZipFile(BytesIO(raw)) as zf:
-                        members = [
-                            info
-                            for info in zf.infolist()
-                            if not info.is_dir()
-                            and Path(info.filename).suffix.lower() in core.IMAGE_EXTS
-                            and "__MACOSX" not in info.filename
-                            and not Path(info.filename).name.startswith(".")
-                        ]
-                        members.sort(key=lambda info: info.filename)
-                        if not members:
-                            raise HTTPException(status_code=400, detail="zip 안에 이미지가 없습니다.")
-                        if len(members) > MAX_SEQUENCE_IMAGES:
-                            raise HTTPException(status_code=413, detail="이미지 개수 제한을 초과했습니다.")
-                        if sum(info.file_size for info in members) > MAX_SEQUENCE_BYTES:
-                            raise HTTPException(status_code=413, detail="압축 해제 크기 제한을 초과했습니다.")
-                        items = [(Path(info.filename).name, zf.read(info)) for info in members]
-                except zipfile.BadZipFile as exc:
-                    raise HTTPException(status_code=400, detail="유효하지 않은 zip 파일입니다.") from exc
-            else:
-                assert files is not None
-                if len(files) > MAX_SEQUENCE_IMAGES:
-                    raise HTTPException(status_code=413, detail="이미지 개수 제한을 초과했습니다.")
-                total = 0
-                for upload in files:
-                    name = _safe_name(upload.filename)
-                    data = await _read_limited(upload, MAX_SEQUENCE_BYTES)
-                    total += len(data)
-                    if total > MAX_SEQUENCE_BYTES:
-                        raise HTTPException(status_code=413, detail="이미지 전체 크기 제한을 초과했습니다.")
-                    items.append((name, data))
-
-            for index, (name, data) in enumerate(items):
-                _validate_image(data, name)
-                suffix = Path(name).suffix.lower()
-                (seq_dir / f"{index:04d}{suffix}").write_bytes(data)
-
-            async with analysis_slots:
-                payload = await run_in_threadpool(_run_sequence, seq_dir, opts, temp_path / "output")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise _public_error(request_id, exc) from exc
-    finally:
-        for upload in opened_uploads:
-            await upload.close()
     return {"message": "success", "request_id": request_id, "result": payload}
 
 
